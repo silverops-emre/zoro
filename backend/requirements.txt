@@ -1,0 +1,5 @@
+flask>=3.1,<4
+openai>=3.42,<4
+python-dotenv>=1.0
+gunicorn>=23
+httpx>=0.28
