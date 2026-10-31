@@ -126,7 +126,8 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
 
     def run_brain(turn: Turn, message: str) -> dict[str, Any]:
         # The v1 app gives up after 10 s (OkHttp default read timeout).
-        turn.deadline = time.monotonic() + (55.0 if turn.client.capabilities else 9.0)
+        budget = cfg.turn_budget_v2_s if turn.client.capabilities else cfg.turn_budget_v1_s
+        turn.deadline = time.monotonic() + budget
         try:
             return brain().answer(turn, message)
         except AIUnavailable as error:

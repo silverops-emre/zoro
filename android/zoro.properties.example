@@ -6,3 +6,12 @@ zoro.basicUser=
 zoro.basicPassword=
 # Sunucudaki ZORO_API_KEY ile ayni (bos birakilabilir)
 zoro.apiKey=
+
+# Optional: sign with the keystore that signed the APK already on Zafer Bey's
+# phone, so v2 installs as an UPDATE and keeps local calendar/reminders/memory.
+# Android Studio "Run" uses %USERPROFILE%\.android\debug.keystore on Windows
+# (password android, alias androiddebugkey).
+zoro.keystore.path=
+zoro.keystore.password=android
+zoro.keystore.alias=androiddebugkey
+zoro.keystore.keyPassword=android

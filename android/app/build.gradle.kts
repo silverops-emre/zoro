@@ -19,6 +19,10 @@ fun zoroProp(key: String, default: String = ""): String =
         .replace("\\", "\\\\")
         .replace("\"", "\\\"")
 
+// Zafer Bey'in telefonundaki kurulumla ayni imza: guncelleme yerinde olur,
+// telefondaki takvim/hatirlatma/hafiza silinmez. Bos ise varsayilan debug imzasi.
+val zoroKeystore = (zoroProps.getProperty("zoro.keystore.path") ?: "").trim()
+
 android {
     namespace = "com.zaferyilmaz.zoro"
     compileSdk {
@@ -43,11 +47,28 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (zoroKeystore.isNotEmpty()) {
+            create("zoro") {
+                storeFile = file(zoroKeystore)
+                storePassword = (zoroProps.getProperty("zoro.keystore.password") ?: "android").trim()
+                keyAlias = (zoroProps.getProperty("zoro.keystore.alias") ?: "androiddebugkey").trim()
+                keyPassword = (zoroProps.getProperty("zoro.keystore.keyPassword") ?: "android").trim()
+            }
+        }
+    }
+
     buildTypes {
         debug {
             manifestPlaceholders["usesCleartextTraffic"] = "true"
+            if (zoroKeystore.isNotEmpty()) {
+                signingConfig = signingConfigs.getByName("zoro")
+            }
         }
         release {
+            if (zoroKeystore.isNotEmpty()) {
+                signingConfig = signingConfigs.getByName("zoro")
+            }
             optimization {
                 enable = true
                 packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")

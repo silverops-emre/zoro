@@ -27,3 +27,4 @@ android/zoro.properties
 *.db-shm
 *.db-journal
 zoro.db*
+dist/

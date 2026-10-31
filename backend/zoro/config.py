@@ -44,6 +44,10 @@ class Config:
     user_full_name: str = "Zafer Yılmaz"
     home_city: str = "İstanbul"
     confirm_ttl_s: int = 180
+    # Seconds a whole /ask turn may take. v1 app: OkHttp 10 s read timeout.
+    # v2 app waits 60 s, but gunicorn kills a worker after --timeout (30 s default).
+    turn_budget_v1_s: float = 9.0
+    turn_budget_v2_s: float = 25.0
     max_message_chars: int = 2000
     trust_proxy: bool = True
     extra: dict = field(default_factory=dict)
@@ -70,6 +74,8 @@ def load_config(base_dir: Path | None = None) -> Config:
         user_full_name=os.environ.get("ZORO_USER_FULL_NAME", "Zafer Yılmaz"),
         home_city=os.environ.get("ZORO_HOME_CITY", "İstanbul"),
         confirm_ttl_s=max(30, _int(os.environ.get("ZORO_CONFIRM_TTL"), 180)),
+        turn_budget_v1_s=float(os.environ.get("ZORO_TURN_BUDGET_V1", "9") or 9),
+        turn_budget_v2_s=float(os.environ.get("ZORO_TURN_BUDGET_V2", "25") or 25),
         max_message_chars=max(200, _int(os.environ.get("ZORO_MAX_MESSAGE_CHARS"), 2000)),
         trust_proxy=_bool(os.environ.get("ZORO_TRUST_PROXY"), True),
     )
