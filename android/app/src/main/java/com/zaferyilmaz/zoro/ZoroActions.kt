@@ -26,12 +26,13 @@ import java.util.Locale
 
 interface ZoroReminderPort {
 
+    // false: alarm telefonda kurulamadi
     fun scheduleReminderFromServer(
         taskText: String,
         dueAt: String,
         alarmId: String,
         repeatInterval: Long
-    )
+    ): Boolean
 
     fun cancelReminderFromServer(
         alarmId: String,
@@ -131,12 +132,17 @@ object ZoroActions {
 
                         val dueAt = action.optString("due_at")
 
-                        if (dueAt.isNotBlank() && dueAt != "null") {
-                            reminders.scheduleReminderFromServer(
-                                taskText = action.optString("text"),
-                                dueAt = dueAt,
-                                alarmId = action.optString("alarm_id"),
-                                repeatInterval = action.optLong("repeat_interval", 0L)
+                        val scheduled = dueAt.isNotBlank() && dueAt != "null" &&
+                                reminders.scheduleReminderFromServer(
+                                    taskText = action.optString("text"),
+                                    dueAt = dueAt,
+                                    alarmId = action.optString("alarm_id"),
+                                    repeatInterval = action.optLong("repeat_interval", 0L)
+                                )
+
+                        if (!scheduled) {
+                            failures.add(
+                                "${action.optString("text")} hatırlatması telefonda kurulamadı."
                             )
                         }
                     }
@@ -224,74 +230,127 @@ object ZoroActions {
     // UYGULAMA AKSIYONLARI
     // ==========================================
 
+    // Bir aksiyonun sonucu: acilacak intent ya da kullaniciya okunacak sorun.
+    private data class Built(
+        val intent: Intent? = null,
+        val problem: String? = null,
+        val label: String = ""
+    )
+
     fun runIntentActions(
         activity: Activity,
-        actions: List<JSONObject>
+        actions: List<JSONObject>,
+        inForeground: Boolean
     ): List<String> {
 
         val failures = mutableListOf<String>()
 
         for (action in actions.filterNot { isDataAction(it) }) {
 
-            val failure = try {
-
-                when (action.optString("type")) {
-                    "navigate" -> navigate(activity, action)
-                    "call" -> call(activity, action)
-                    "message" -> message(activity, action)
-                    "open_app" -> openApp(activity, action)
-                    "set_alarm" -> setAlarm(activity, action)
-                    "set_timer" -> setTimer(activity, action)
-                    else -> null
-                }
-
-            } catch (error: ActivityNotFoundException) {
-
-                Log.e(TAG, "Uygulama bulunamadi: $action", error)
-                "Bu işi yapacak uygulama telefonda bulunamadı."
-
+            val built = try {
+                build(activity, action)
             } catch (error: Exception) {
-
-                Log.e(TAG, "Aksiyon hatasi: $action", error)
-                "İşlem başlatılamadı."
+                Log.e(TAG, "Aksiyon hazirlanamadi: $action", error)
+                Built(problem = "İşlem başlatılamadı.")
             }
 
-            if (failure != null) {
-                failures.add(failure)
+            if (built.problem != null) {
+                failures.add(built.problem)
+                continue
+            }
+
+            val intent = built.intent ?: continue
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+            if (!inForeground) {
+                // Android arka plandaki uygulamanin ekran acmasini sessizce engeller.
+                // Bildirime dokununca acilir.
+                failures.add(
+                    if (notifyAction(activity, intent, built.label))
+                        "Ekran kapalıyken açamıyorum. Bildirime dokunarak açabilirsiniz."
+                    else
+                        "Ekran kapalıyken açamıyorum. Zoro'yu açıp tekrar söyleyin."
+                )
+                continue
+            }
+
+            try {
+                activity.startActivity(intent)
+            } catch (error: ActivityNotFoundException) {
+                Log.e(TAG, "Uygulama bulunamadi: $action", error)
+                failures.add("Bu işi yapacak uygulama telefonda bulunamadı.")
+            } catch (error: SecurityException) {
+                Log.e(TAG, "Izin hatasi: $action", error)
+                failures.add("Bu işlem için izin gerekiyor.")
             }
         }
 
         return failures
     }
 
-    private fun start(activity: Activity, intent: Intent) {
+    private fun notifyAction(
+        context: Context,
+        intent: Intent,
+        label: String
+    ): Boolean {
 
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        activity.startActivity(intent)
-    }
-
-    private fun startFirst(activity: Activity, vararg intents: Intent) {
-
-        var last: ActivityNotFoundException? = null
-
-        for (intent in intents) {
-            try {
-                start(activity, intent)
-                return
-            } catch (error: ActivityNotFoundException) {
-                last = error
-            }
+        if (
+            android.os.Build.VERSION.SDK_INT >= 33 &&
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return false
         }
 
-        throw last ?: ActivityNotFoundException()
+        return try {
+
+            val pendingIntent = android.app.PendingIntent.getActivity(
+                context,
+                label.hashCode(),
+                intent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+                        android.app.PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification = androidx.core.app.NotificationCompat.Builder(context, "zoro_reminders")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("Zoro")
+                .setContentText(label.ifBlank { "Açmak için dokunun" })
+                .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+
+            androidx.core.app.NotificationManagerCompat.from(context)
+                .notify(4100 + (label.hashCode() and 0xff), notification)
+
+            true
+
+        } catch (error: Exception) {
+            Log.e(TAG, "Bildirim gosterilemedi", error)
+            false
+        }
     }
 
-    private fun navigate(activity: Activity, action: JSONObject): String? {
+    private fun build(activity: Activity, action: JSONObject): Built {
+
+        return when (action.optString("type")) {
+            "navigate" -> navigate(activity, action)
+            "call" -> call(activity, action)
+            "message" -> message(activity, action)
+            "open_app" -> openApp(activity, action)
+            "set_alarm" -> setAlarm(action)
+            "set_timer" -> setTimer(action)
+            else -> Built()
+        }
+    }
+
+    private fun navigate(activity: Activity, action: JSONObject): Built {
 
         val destination = action.optString("destination").trim()
 
         if (destination.isBlank()) {
-            return "Nereye gideceğinizi anlayamadım."
+            return Built(problem = "Nereye gideceğinizi anlayamadım.")
         }
 
         val mode = when (action.optString("mode")) {
@@ -302,29 +361,39 @@ object ZoroActions {
 
         val encoded = Uri.encode(destination)
 
-        startFirst(
-            activity,
-            Intent(
-                Intent.ACTION_VIEW,
-                Uri.parse("google.navigation:q=$encoded&mode=$mode")
-            ).setPackage("com.google.android.apps.maps"),
-            Intent(
-                Intent.ACTION_VIEW,
-                Uri.parse("https://www.google.com/maps/dir/?api=1&destination=$encoded")
-            )
+        // Haritalar yuklu degilse ayni adresi tarayici acar.
+        val maps = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("google.navigation:q=$encoded&mode=$mode")
+        ).setPackage("com.google.android.apps.maps")
+
+        val web = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("https://www.google.com/maps/dir/?api=1&destination=$encoded")
         )
 
-        return null
+        val mapsInstalled = maps.resolveActivity(activity.packageManager) != null
+
+        return Built(
+            intent = if (mapsInstalled) maps else web,
+            label = "$destination için yol tarifi"
+        )
     }
 
     // ==========================================
     // REHBER
     // ==========================================
 
+    // Eslesme seviyesi: 0 tam ad, 1 bir kelimesi birebir ayni, 2 yalnizca on ek.
+    data class ContactSearch(
+        val matches: List<ZoroContactMatch>,
+        val level: Int
+    )
+
     fun findContacts(
         context: Context,
         name: String
-    ): List<ZoroContactMatch>? {
+    ): ContactSearch? {
 
         if (
             context.checkSelfPermission(
@@ -337,12 +406,11 @@ object ZoroActions {
         val wanted = name.trim().lowercase(turkish)
 
         if (wanted.isBlank()) {
-            return emptyList()
+            return ContactSearch(emptyList(), 2)
         }
 
-        val exact = mutableListOf<ZoroContactMatch>()
-        val starts = mutableListOf<ZoroContactMatch>()
-        val words = mutableListOf<ZoroContactMatch>()
+        val wantedWords = wanted.split(" ").filter { it.isNotBlank() }
+        val levels = List(3) { mutableListOf<ZoroContactMatch>() }
 
         context.contentResolver.query(
             ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
@@ -359,83 +427,96 @@ object ZoroActions {
 
                 val display = cursor.getString(0).orEmpty()
                 val number = cursor.getString(1).orEmpty()
-                val lower = display.lowercase(turkish)
 
                 if (number.isBlank()) continue
 
+                val lower = display.lowercase(turkish)
+                val words = lower.split(" ").filter { it.isNotBlank() }
                 val match = ZoroContactMatch(display, number)
 
                 when {
-                    lower == wanted -> exact.add(match)
-                    lower.startsWith(wanted) -> starts.add(match)
-                    lower.split(" ").any { it.startsWith(wanted) } -> words.add(match)
+                    lower == wanted -> levels[0].add(match)
+                    wantedWords.all { it in words } -> levels[1].add(match)
+                    wantedWords.all { w -> words.any { it.startsWith(w) } } -> levels[2].add(match)
                 }
             }
         }
 
-        val best = exact.ifEmpty { starts.ifEmpty { words } }
+        val level = levels.indexOfFirst { it.isNotEmpty() }.let { if (it < 0) 2 else it }
 
-        return best.distinctBy {
-            it.number.filter { ch -> ch.isDigit() }.takeLast(10)
-        }
+        return ContactSearch(
+            matches = levels[level].distinctBy {
+                it.number.filter { ch -> ch.isDigit() }.takeLast(10)
+            },
+            level = level
+        )
     }
+
+    // Sonuc: numara, sorun, numara rehberden kesin eslesmeyle mi geldi
+    private data class Resolved(
+        val number: String?,
+        val problem: String?,
+        val trusted: Boolean
+    )
 
     private fun resolveNumber(
         activity: Activity,
         name: String,
         spokenNumber: String
-    ): Pair<String?, String?> {
+    ): Resolved {
 
-        if (spokenNumber.any { it.isDigit() }) {
-            return spokenNumber to null
+        if (spokenNumber.count { it.isDigit() } >= 7) {
+            // Sunucu yalnizca kullanicinin soyledigi numarayi gecirir;
+            // yine de arama tusuna kullanici basar.
+            return Resolved(spokenNumber, null, trusted = false)
         }
 
-        val matches = findContacts(activity, name)
-            ?: return null to "Rehber izni olmadığı için $name kişisini bulamadım. " +
-                    "Zoro'ya rehber izni verin."
+        val search = findContacts(activity, name)
+            ?: return Resolved(
+                null,
+                "Rehber izni olmadığı için $name kişisini bulamadım. Zoro'ya rehber izni verin.",
+                false
+            )
 
-        val names = matches.map { it.name }.distinct()
+        val names = search.matches.map { it.name }.distinct()
 
         return when {
-            matches.isEmpty() ->
-                null to "Rehberde $name adında birini bulamadım."
+            search.matches.isEmpty() ->
+                Resolved(null, "Rehberde $name adında birini bulamadım.", false)
             names.size > 1 ->
-                null to "Rehberde birden fazla kişi var: " +
-                        names.take(3).joinToString(", ") +
-                        ". Hangisi olduğunu tam adıyla söyler misiniz?"
+                Resolved(
+                    null,
+                    "Rehberde birden fazla $name var: " +
+                            names.take(3).joinToString(", ") +
+                            ". Hangisi olduğunu söyler misiniz?",
+                    false
+                )
             else ->
-                matches.first().number to null
+                Resolved(search.matches.first().number, null, trusted = search.level <= 1)
         }
     }
 
-    private fun call(activity: Activity, action: JSONObject): String? {
+    private fun call(activity: Activity, action: JSONObject): Built {
 
         val name = action.optString("name")
-        val (number, problem) = resolveNumber(
-            activity,
-            name,
-            action.optString("number")
-        )
-
-        if (number == null) {
-            return problem
-        }
+        val resolved = resolveNumber(activity, name, action.optString("number"))
+        val number = resolved.number ?: return Built(problem = resolved.problem)
 
         val canCall = activity.checkSelfPermission(
             Manifest.permission.CALL_PHONE
         ) == PackageManager.PERMISSION_GRANTED
 
-        // Izin yoksa numara cevirici ekranda hazir acilir,
-        // arama tusuna kullanici basar.
-        start(
-            activity,
-            Intent(
-                if (canCall) Intent.ACTION_CALL else Intent.ACTION_DIAL,
-                Uri.parse("tel:" + Uri.encode(number))
-            )
-        )
+        // Dogrudan arama yalnizca rehberde birebir isim eslesmesinde.
+        // Digerlerinde numara ceviricide hazir acilir, arama tusuna kullanici basar.
+        val direct = canCall && resolved.trusted
 
-        return null
+        return Built(
+            intent = Intent(
+                if (direct) Intent.ACTION_CALL else Intent.ACTION_DIAL,
+                Uri.parse("tel:" + Uri.encode(number))
+            ),
+            label = "${name.ifBlank { number }} aranıyor"
+        )
     }
 
     fun whatsappDigits(number: String): String {
@@ -449,59 +530,48 @@ object ZoroActions {
         return digits
     }
 
-    private fun message(activity: Activity, action: JSONObject): String? {
+    private fun message(activity: Activity, action: JSONObject): Built {
 
         val recipient = action.optString("recipient")
         val text = action.optString("text")
 
-        val (number, problem) = resolveNumber(activity, recipient, "")
+        // Alici numara olarak soylendiyse rehberde aranmaz.
+        val spoken = if (recipient.count { it.isDigit() } >= 7) recipient else ""
+        val resolved = resolveNumber(activity, recipient, spoken)
+        val number = resolved.number ?: return Built(problem = resolved.problem)
 
-        if (number == null) {
-            return problem
-        }
-
-        if (action.optString("app") == "sms") {
-
-            start(
-                activity,
-                Intent(
-                    Intent.ACTION_SENDTO,
-                    Uri.parse("smsto:" + Uri.encode(number))
-                ).putExtra("sms_body", text)
-            )
-
+        val intent = if (action.optString("app") == "sms") {
+            Intent(
+                Intent.ACTION_SENDTO,
+                Uri.parse("smsto:" + Uri.encode(number))
+            ).putExtra("sms_body", text)
         } else {
-
-            start(
-                activity,
-                Intent(
-                    Intent.ACTION_VIEW,
-                    Uri.parse(
-                        "https://wa.me/" + whatsappDigits(number) +
-                                "?text=" + Uri.encode(text)
-                    )
-                )
+            Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("https://wa.me/" + whatsappDigits(number) + "?text=" + Uri.encode(text))
             )
         }
 
-        return null
+        return Built(intent = intent, label = "$recipient için mesaj taslağı")
     }
 
     private fun launchPackage(activity: Activity, packageName: String): Intent? =
         activity.packageManager.getLaunchIntentForPackage(packageName)
 
-    private fun openApp(activity: Activity, action: JSONObject): String? {
+    private fun openApp(activity: Activity, action: JSONObject): Built {
 
         val query = action.optString("query").trim()
         val encoded = Uri.encode(query)
+        val app = action.optString("app")
 
-        val intent: Intent? = when (action.optString("app")) {
+        val intent: Intent? = when (app) {
 
             "youtube" ->
                 if (query.isNotBlank())
                     Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=$encoded"))
                 else
                     launchPackage(activity, "com.google.android.youtube")
+                        ?: Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com"))
 
             "spotify" ->
                 if (query.isNotBlank())
@@ -509,7 +579,9 @@ object ZoroActions {
                 else
                     launchPackage(activity, "com.spotify.music")
 
-            "whatsapp" -> launchPackage(activity, "com.whatsapp")
+            "whatsapp" ->
+                launchPackage(activity, "com.whatsapp")
+                    ?: launchPackage(activity, "com.whatsapp.w4b")
 
             "maps" ->
                 Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=$encoded"))
@@ -537,15 +609,13 @@ object ZoroActions {
             else -> null
         }
 
-        if (intent == null) {
-            return "Bu uygulama telefonda yüklü değil."
-        }
-
-        start(activity, intent)
-        return null
+        return if (intent == null)
+            Built(problem = "Bu uygulama telefonda yüklü değil.")
+        else
+            Built(intent = intent, label = "$app açılıyor")
     }
 
-    private fun setAlarm(activity: Activity, action: JSONObject): String? {
+    private fun setAlarm(action: JSONObject): Built {
 
         val intent = Intent(AlarmClock.ACTION_SET_ALARM)
             .putExtra(AlarmClock.EXTRA_HOUR, action.optInt("hour"))
@@ -558,11 +628,10 @@ object ZoroActions {
             intent.putExtra(AlarmClock.EXTRA_MESSAGE, label)
         }
 
-        start(activity, intent)
-        return null
+        return Built(intent = intent, label = "Alarm kuruluyor")
     }
 
-    private fun setTimer(activity: Activity, action: JSONObject): String? {
+    private fun setTimer(action: JSONObject): Built {
 
         val intent = Intent(AlarmClock.ACTION_SET_TIMER)
             .putExtra(AlarmClock.EXTRA_LENGTH, action.optInt("seconds"))
@@ -574,7 +643,6 @@ object ZoroActions {
             intent.putExtra(AlarmClock.EXTRA_MESSAGE, label)
         }
 
-        start(activity, intent)
-        return null
+        return Built(intent = intent, label = "Zamanlayıcı kuruluyor")
     }
 }

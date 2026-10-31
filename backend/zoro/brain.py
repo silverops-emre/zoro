@@ -9,8 +9,10 @@ import time
 from typing import Any
 
 from .store import Store
-from .timeutil import human_time, iso, long_date, parse_iso
-from .tools import CAP_LABELS, FINAL_TOOLS, Turn, execute, execute_pending, task_ref, task_when, tool_specs
+from datetime import timedelta
+
+from .timeutil import DAILY_MS, human_time, iso, long_date, next_occurrence_daily, parse_iso
+from .tools import CAP_LABELS, FINAL_TOOLS, Turn, execute, execute_pending, open_confirmation, task_ref, task_when, tool_specs
 
 log = logging.getLogger("zoro.brain")
 
@@ -26,7 +28,7 @@ Konuşma
 - Cevap genelde 1-2 cümle. Liste okurken en fazla 5 madde söyle, kalanı "ve N tane daha" diye özetle.
 - Emoji, markdown, madde işareti, bağlantı ve sembol (=, /, —, %, parantez) kullanma; konuşur gibi yaz ("yüzde 20", "49 lira 86 kuruş"). Saatleri 14:30 gibi yaz.
 - Hava durumunu en fazla 2 cümlede söyle: durum, sıcaklık, yağış ihtimali yüksekse o. Rüzgâr gibi ayrıntıyı sorulmadıkça söyleme.
-- Eksik ya da belirsiz istekte tahmin yürütme, tek kısa soru sor.
+- Eksik ya da belirsiz istekte tahmin yürütme, tek kısa soru sor. Bunun dışında cevabı soruyla bitirme ("Başka bir şey ister misiniz?" gibi sorular sorma).
 
 Eylemler
 - Bir iş istendiğinde ilgili aracı çağır. Araç ok:true dönmeden "yaptım" deme. Araç hata dönerse sebebini kısaca söyle.
@@ -34,7 +36,9 @@ Eylemler
 - Aracı olmayan işi yapamadığını dürüstçe söyle, yapabildiğin en yakın şeyi öner.
 - "Hatırlat", "unutmayayım", "alarm kur ki ...", "her gün 9'da ..." → add_task (telefon o saatte sesli hatırlatır).
 - Toplantı, randevu, görüşme, etkinlik → takvim araçları (calendar_*). "Takvime" denmese de böyledir. Takvim sorularını bağlamdaki takvimden cevapla.
-- Uyandırma alarmı ("beni 7'de uyandır") → set_alarm; geri sayım → set_timer. Bu araçlar yoksa add_task kullan.
+- Uyandırma alarmı ("beni 7'de uyandır") önümüzdeki 24 saat içindeyse → set_alarm; daha ileri bir gün ya da bu araç yoksa add_task. Geri sayım → set_timer.
+- Günlük bir hatırlatma için "içtim, yaptım" denirse complete_task bugünlük kapatır, seri sürer. Tamamen durdurmak isterse delete_task.
+- Zamanı geçmiş hatırlatmaları "bekleyen" diye sayma.
 - "Bunu unutma", "aklında tut", "hafızana kaydet" ve kişisel bilgiler → remember. Hafızadaki bir şey sorulursa bağlamdaki hafıza kayıtlarından cevap ver; yoksa bilmediğini söyle.
 - Zamanı daima bağlamdaki "Şu an" bilgisine göre hesapla ve araçlara saat dilimli ISO-8601 ver (örn. 2026-11-03T14:00:00+03:00). Saat hiç söylenmediyse sor. "Sabah" 09:00, "öğlen" 12:00, "öğleden sonra" 15:00, "akşam" 19:00 kabul et ve cevapta saati söyle.
 - Silme işlemlerinde sadece aracı çağır; onayı sistem kullanıcıya soracak.
@@ -93,15 +97,31 @@ def context_block(turn: Turn, message: str) -> str:
         lines.append("Telefonun yapabildikleri: yok (eski uygulama sürümü; yalnızca sunucu hatırlatmaları ve hafıza). "
                      "Navigasyon, arama, mesaj ve takvim değişikliği yapamazsın; sözlü yol tarifi de teklif etme.")
 
-    tasks = turn.store.list_tasks(pending_only=True)
-    if tasks:
-        lines.append(f"Bekleyen görevler ve hatırlatmalar ({len(tasks)}):")
-        for task in tasks[:40]:
+    upcoming, overdue = [], []
+    for task in turn.store.list_tasks(pending_only=True):
+        due = parse_iso(task.get("due_at"), turn.tz)
+        if due is not None and task.get("repeat_interval") == DAILY_MS:
+            upcoming.append((next_occurrence_daily(due, now), task))
+        elif due is None:
+            upcoming.append((now + timedelta(days=3650), task))
+        elif due >= now - timedelta(hours=1):
+            upcoming.append((due, task))
+        else:
+            overdue.append((due, task))
+    upcoming.sort(key=lambda pair: pair[0])
+    if upcoming:
+        lines.append(f"Bekleyen görevler ve hatırlatmalar ({len(upcoming)}, en yakını önce):")
+        for _, task in upcoming[:40]:
             lines.append(f"- [{task_ref(task)}] {task['text']} — {task_when(turn, task)}")
-        if len(tasks) > 40:
-            lines.append(f"- ... ve {len(tasks) - 40} tane daha")
+        if len(upcoming) > 40:
+            lines.append(f"- ... ve {len(upcoming) - 40} tane daha")
     else:
         lines.append("Bekleyen görev yok.")
+    if overdue:
+        overdue.sort(key=lambda pair: pair[0])
+        lines.append(f"Zamanı geçmiş, çalmış tek seferlik hatırlatmalar ({len(overdue)}, son 3'ü):")
+        for _, task in overdue[-3:]:
+            lines.append(f"- [{task_ref(task)}] {task['text']} — {task_when(turn, task)}")
 
     if turn.calendar is None:
         lines.append("Takvim: bu cihaz takvim bilgisi göndermiyor.")
@@ -124,6 +144,11 @@ def context_block(turn: Turn, message: str) -> str:
     else:
         lines.append("Hafızada kayıt yok.")
 
+    if turn.client_note:
+        lines.append(
+            f"Telefonun son notu (önceki cevaptan sonra telefonda olan, kullanıcı bunu duydu): \"{turn.client_note}\""
+        )
+
     if turn.pending:
         lines.append(
             f"Onay bekleyen işlem: \"{turn.pending['summary']}\". Kullanıcı bu soruya evet ya da hayır "
@@ -136,23 +161,34 @@ def context_block(turn: Turn, message: str) -> str:
 
 NO_RE = re.compile(
     r"\b(hay[ıi]r|vazge[çc]|vazge[çc]tim|dur|durdur|istemiyorum|bo[şs]ver|gerek yok|silme|yapma|"
-    r"iptal etme|olmas[ıi]n|kals[ıi]n|sakın|sak[ıi]n)\b"
+    r"iptal etme|olmas[ıi]n|kals[ıi]n|sak[ıi]n)\b"
 )
-YES_RE = re.compile(
-    r"\b(evet|evt|tamam|olur|onayla|onayl[ıi]yorum|aynen|kesinlikle|eminim|sil|sil gitsin|iptal et|"
-    r"yap|devam|ok|okey|peki|tabii|tabi|elbette)\b"
-)
+# Whole-utterance confirmations only: "peki saat kaç" or "tamam annemi ara"
+# must not delete anything.
+YES_PHRASES = {
+    "evet", "evt", "evet evet", "evet sil", "evet silebilirsin", "evet sil gitsin", "sil", "sil gitsin",
+    "silebilirsin", "tamam", "tamam sil", "evet tamam", "tamam evet", "olur", "olur sil", "evet olur",
+    "onayla", "onaylıyorum", "onayliyorum", "evet onaylıyorum", "kesinlikle", "eminim", "evet eminim",
+    "aynen", "aynen sil", "evet lütfen", "evet lutfen", "iptal et", "evet iptal et", "tamam iptal et",
+    "evet yap", "yap", "he", "hı hı", "hıhı",
+}
+QUESTION_RE = re.compile(r"\bm[ıiuü](s[ıiuü]n|y[ıiuü]m|d[ıiuü]r)?\b")
 
 
 def yes_no(message: str) -> str | None:
     """Deterministic answer to a pending question. None = let the model decide."""
-    text = re.sub(r"^\s*(hey\s+)?zor+o\b[\s,:]*", "", message.strip().lower())
-    text = re.sub(r"[.!?,]", " ", text)
-    if not text.strip() or len(text.split()) > 5:
+    raw = message.strip().lower()
+    if "?" in raw:
+        return None
+    text = re.sub(r"^\s*(hey\s+)?zor+o\b[\s,:]*", "", raw)
+    text = re.sub(r"[.!,;:]", " ", text)
+    text = re.sub(r"\b(l[üu]tfen|zoro)\b", " ", text)
+    text = " ".join(text.split())
+    if not text or len(text.split()) > 5 or QUESTION_RE.search(text):
         return None
     if NO_RE.search(text):
         return "no"
-    if YES_RE.search(text):
+    if text in YES_PHRASES:
         return "yes"
     return None
 
@@ -201,21 +237,40 @@ class Brain:
         self.client = client
 
     def _create(self, turn: Turn, **kwargs: Any) -> Any:
+        timeout = turn.cfg.openai_timeout_s
+        if turn.deadline is not None:
+            timeout = min(timeout, max(1.0, turn.deadline - time.monotonic()))
         params: dict[str, Any] = {
             "model": turn.cfg.model,
             "instructions": instructions(turn),
             "tools": tool_specs(turn),
-            "timeout": turn.cfg.openai_timeout_s,
+            "timeout": timeout,
             **kwargs,
         }
         if turn.cfg.reasoning_effort:
             params["reasoning"] = {"effort": turn.cfg.reasoning_effort}
+        client = self.client
+        if turn.deadline is not None and turn.deadline - time.monotonic() < 15 and hasattr(client, "with_options"):
+            client = client.with_options(max_retries=0)  # no time for a retry
         try:
-            return self.client.responses.create(**params)
+            return client.responses.create(**params)
         except Exception as error:
             raise AIUnavailable(f"{type(error).__name__}: {error}") from error
 
+    def _time_left(self, turn: Turn) -> float:
+        return float("inf") if turn.deadline is None else turn.deadline - time.monotonic()
+
     def answer(self, turn: Turn, message: str) -> dict[str, Any]:
+        turn.message = message
+        try:
+            return self._answer(turn, message)
+        finally:
+            if turn.pending:
+                # The open question was answered (closed already) or ignored:
+                # never let a later unrelated "tamam" run the old delete.
+                turn.store.close_pending(turn.pending["id"], "ignored")
+
+    def _answer(self, turn: Turn, message: str) -> dict[str, Any]:
         started = time.monotonic()
 
         # A short yes/no to an open question is handled without the model.
@@ -249,22 +304,21 @@ class Brain:
                     "call_id": _attr(call, "call_id"),
                     "output": json.dumps(result, ensure_ascii=False, default=str),
                 })
+            if open_confirmation(turn):
+                # Destructive request: ask the server-built question, nothing else.
+                question = turn.pending_created["summary"]  # type: ignore[index]
+                reply = (". ".join(turn.notes) + ". " + question) if turn.notes else question
+                return self._finish(turn, message, reply, started, expect_reply=True)
             if turn.says and len(turn.says) == len(calls) and all(_attr(c, "name") in FINAL_TOOLS for c in calls):
                 # Every call succeeded and came with its own sentence: skip round two.
                 return self._finish(turn, message, _clean_reply(" ".join(turn.says)), started)
             turn.says.clear()
-            if turn.pending_created:
-                # Destructive request: ask the server-built question, nothing else.
-                done = [n for n in turn.notes]
-                question = turn.pending_created["summary"]
-                reply = (". ".join(done) + ". " + question) if done else question
-                return self._finish(turn, message, reply, started, expect_reply=True)
+            if self._time_left(turn) < 2.5:
+                # Out of time (the v1 app gives up after 10 s): report what was done.
+                log.warning("turn deadline reached after %d rounds", rounds)
+                reply = (". ".join(turn.notes) + ".") if turn.notes else "Biraz yavaş kaldım, tekrar söyler misiniz?"
+                return self._finish(turn, message, _clean_reply(reply), started)
             response = self._create(turn, previous_response_id=_attr(response, "id"), input=outputs)
-
-        if turn.pending and "confirm_pending" not in turn.tools_called:
-            # The question was not answered: drop it, so a later unrelated
-            # "evet" can never trigger an old delete.
-            turn.store.close_pending(turn.pending["id"], "ignored")
 
         reply = _clean_reply(_output_text(response))
         if not reply:

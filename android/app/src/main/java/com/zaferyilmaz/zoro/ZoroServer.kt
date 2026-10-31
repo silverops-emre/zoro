@@ -83,7 +83,8 @@ object ZoroServer {
 
     fun askBody(
         message: String,
-        calendar: JSONArray?
+        calendar: JSONArray?,
+        clientNote: String? = null
     ): JSONObject {
 
         val client = JSONObject()
@@ -97,6 +98,10 @@ object ZoroServer {
 
         if (calendar != null) {
             context.put("calendar", calendar)
+        }
+
+        if (!clientNote.isNullOrBlank()) {
+            context.put("client_note", clientNote.take(500))
         }
 
         return JSONObject()

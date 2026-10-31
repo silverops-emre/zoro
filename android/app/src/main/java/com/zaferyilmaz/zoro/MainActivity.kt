@@ -128,10 +128,18 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
     private var lastReply by mutableStateOf("")
 
     // Cevap okunduktan sonra yapilacak is (harita, arama ...).
-    private var afterSpeechId: String? = null
-    private var afterSpeech: (() -> Unit)? = null
-    private var listenAfterSpeech = false
+    // Her cevap kendi kimligiyle; ust uste gelen cevaplar birbirinin
+    // isini silmez, eski cevabin bitis sinyali mikrofonu acmaz.
+    private val afterSpeech = mutableMapOf<String, Pair<() -> Unit, Boolean>>()
+    private var currentUtteranceId: String? = null
     private var servicePausedForSpeech = false
+
+    // Arka arkaya en fazla iki kez "cevabi dinle" (arka plan konusmasi dongusu olmasin).
+    private var followUpListens = 0
+
+    // Telefonda olan ve sunucunun bilmedigi son durum (orn. rehberde iki "Okay").
+    // Bir sonraki istekle sunucuya gider.
+    private var clientNote: String? = null
 
     private val tag = "ZORO_REMINDER"
 
@@ -388,50 +396,28 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
 
     private fun requestRequiredPermissions() {
 
-        if (
-            Build.VERSION.SDK_INT >= 37 &&
-            checkSelfPermission(
-                Manifest.permission.ACCESS_LOCAL_NETWORK
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-
-            requestPermissions(
-                arrayOf(
-                    Manifest.permission.ACCESS_LOCAL_NETWORK
-                ),
-                2001
-            )
-        }
-
-        if (
-            Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(
-                Manifest.permission.POST_NOTIFICATIONS
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-
-            requestPermissions(
-                arrayOf(
-                    Manifest.permission.POST_NOTIFICATIONS
-                ),
-                2002
-            )
-        }
-
         // ZORO_V2_PERMISSIONS
-        // "Okay'i ara", "Okay'a yaz" icin rehber ve arama izni.
-        val callPermissions = arrayOf(
+        // Android ayni anda tek izin istegi kabul eder; hepsi tek seferde istenir.
+        // Rehber ve arama izni "Okay'i ara", "Okay'a yaz" icin.
+        val wanted = mutableListOf(
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.CALL_PHONE
-        ).filter {
+        )
+
+        if (Build.VERSION.SDK_INT >= 37) {
+            wanted.add(Manifest.permission.ACCESS_LOCAL_NETWORK)
+        }
+
+        if (Build.VERSION.SDK_INT >= 33) {
+            wanted.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        val missing = wanted.filter {
             checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
         }
 
-        if (callPermissions.isNotEmpty()) {
-            requestPermissions(
-                callPermissions.toTypedArray(),
-                2003
-            )
+        if (missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), 2001)
         }
     }
 
@@ -528,6 +514,8 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
             return
         }
 
+        currentUtteranceId = utteranceId
+
         // ZORO_V2_SPEECH_SYNC
         // Konusurken arka plandaki dinleme servisini sustur.
         if (ZoroVoiceService.isActive) {
@@ -557,34 +545,32 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
         after: (() -> Unit)?
     ) {
 
-        val id = "ZORO_REPLY_" + System.currentTimeMillis()
+        val id = "ZORO_REPLY_" + System.nanoTime()
 
-        afterSpeechId = id
-        afterSpeech = after
-        listenAfterSpeech = listenForReply
+        afterSpeech[id] = (after ?: {}) to listenForReply
 
         speak(text, id)
     }
 
     private fun onSpeechFinished(utteranceId: String?) {
 
-        var listen = false
+        val entry = utteranceId?.let { afterSpeech.remove(it) }
 
-        if (utteranceId != null && utteranceId == afterSpeechId) {
-
-            val work = afterSpeech
-            listen = listenAfterSpeech
-
-            afterSpeechId = null
-            afterSpeech = null
-            listenAfterSpeech = false
-
-            try {
-                work?.invoke()
-            } catch (error: Exception) {
-                Log.e("ZORO_ACTIONS", "Cevap sonrasi islem hatasi", error)
-            }
+        try {
+            // Yarida kesilen eski cevabin isi (orn. arama) yine yapilir.
+            entry?.first?.invoke()
+        } catch (error: Exception) {
+            Log.e("ZORO_ACTIONS", "Cevap sonrasi islem hatasi", error)
         }
+
+        // Yalnizca en son baslayan konusma bitince mikrofon acilir.
+        // Is sirasinda yeni bir hata okunmaya basladiysa onun bitisi bekler.
+        if (utteranceId != currentUtteranceId) {
+            return
+        }
+
+        val listen = entry?.second == true && followUpListens < 2
+        followUpListens = if (listen) followUpListens + 1 else 0
 
         if (servicePausedForSpeech) {
 
@@ -1427,9 +1413,13 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
             null
         }
 
+        val note = clientNote
+        clientNote = null
+
         val body = ZoroServer.askBody(
             message = message,
-            calendar = calendarContext
+            calendar = calendarContext,
+            clientNote = note
         )
             .toString()
             .toRequestBody(
@@ -1604,6 +1594,10 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                                         failures.joinToString(" ")
                                     else reply
 
+                                if (failures.isNotEmpty()) {
+                                    clientNote = spoken
+                                }
+
                                 if (fromTaskScreen) {
 
                                     tasksMessage = spoken
@@ -1631,13 +1625,26 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                                             val actionFailures =
                                                 ZoroActions.runIntentActions(
                                                     this@MainActivity,
-                                                    serverActions
+                                                    serverActions,
+                                                    inForeground = lifecycle.currentState.isAtLeast(
+                                                        androidx.lifecycle.Lifecycle.State.STARTED
+                                                    )
                                                 )
 
                                             if (actionFailures.isNotEmpty()) {
+
                                                 val text = actionFailures.joinToString(" ")
                                                 lastReply = text
-                                                speak(text, "ZORO_ACTION_ERROR")
+
+                                                // Sunucu bir sonraki istekte ne oldugunu bilsin
+                                                // ("hangi Okay?" sorusuna verilen cevap anlasilsin).
+                                                clientNote = text
+
+                                                speakThen(
+                                                    text = text,
+                                                    listenForReply = text.trimEnd().endsWith("?") && !typed,
+                                                    after = null
+                                                )
                                             }
                                         }
                                     }
@@ -2018,23 +2025,27 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
         dueAt: String,
         alarmId: String,
         repeatInterval: Long
-    ) {
+    ): Boolean {
 
         if (taskText.isBlank() || !isValidDueAt(dueAt)) {
-            return
+            return false
         }
 
-        // Ayni alarm kimligi varsa once eskisini kaldir (saat degisikligi).
-        if (alarmId.isNotBlank()) {
-            cancelReminderByAlarmId(alarmId)
-        }
+        val id = alarmId.ifBlank { dueAt }
 
+        // Ayni kimlikle kurulan alarm eskisinin yerine gecer (FLAG_UPDATE_CURRENT),
+        // once iptal edilmez: yeni alarm kurulamazsa eskisi kaybolmasin.
         scheduleReminder(
             taskText = taskText,
             dueAt = dueAt,
-            alarmId = alarmId.ifBlank { dueAt },
+            alarmId = id,
             repeatInterval = repeatInterval
         )
+
+        // scheduleReminder yalnizca alarm kurulunca kaydeder.
+        return ReminderStore.getAllReminders(applicationContext).any {
+            it.alarmId == id && it.dueAt == dueAt
+        }
     }
 
     override fun cancelReminderFromServer(

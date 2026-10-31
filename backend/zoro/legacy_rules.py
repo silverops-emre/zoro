@@ -47,7 +47,8 @@ def clock_time(text):
     if not match:
         return None
     hour = int(match.group(1))
-    minute = int(match.group(2) or 0)
+    # The third pattern ("9'da") has one group; v1 crashed here with IndexError.
+    minute = int(match.group(2) or 0) if match.re.groups >= 2 else 0
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
     if "aksam" in text or "ogleden sonra" in text:

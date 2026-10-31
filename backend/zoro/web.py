@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import time
 from datetime import timedelta
 from typing import Any, Callable
 
@@ -96,6 +97,8 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
         tz = zone(context.get("tz") if isinstance(context.get("tz"), str) else None, cfg.timezone)
         turn = Turn(cfg=cfg, store=store, tz=tz, now=now_in(tz), client=parse_client(data))
         turn.calendar = parse_calendar(context, turn)
+        note = context.get("client_note")
+        turn.client_note = " ".join(str(note).split())[:500] if isinstance(note, str) else ""
         turn.pending = store.active_pending(turn.now)
         return turn
 
@@ -122,11 +125,22 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
         return jsonify({"ok": True, "service": "zoro", "version": VERSION})
 
     def run_brain(turn: Turn, message: str) -> dict[str, Any]:
+        # The v1 app gives up after 10 s (OkHttp default read timeout).
+        turn.deadline = time.monotonic() + (55.0 if turn.client.capabilities else 9.0)
         try:
             return brain().answer(turn, message)
         except AIUnavailable as error:
             log.error("AI unavailable: %s", error)
-            reply = legacy_rules.fallback(turn, message)
+            if turn.tools_called:
+                # Some tools already ran: never repeat them through the rules.
+                done = ". ".join(turn.notes)
+                reply = (done + ". " if done else "") + "Gerisini tamamlayamadım, tekrar dener misiniz?"
+            else:
+                try:
+                    reply = legacy_rules.fallback(turn, message)
+                except Exception:
+                    log.exception("offline fallback failed")
+                    reply = legacy_rules.OFFLINE_NOTE + " Biraz sonra tekrar deneyin."
             store.add_message("user", message)
             store.add_message("assistant", reply, turn.actions or None)
             return build_response(turn, reply, error="ai_unavailable")
@@ -194,7 +208,7 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
         new_text, new_due = data.get("text"), data.get("due_at")
         if not isinstance(new_text, str) or not new_text.strip() or len(new_text.strip()) > 500:
             return jsonify({"success": False, "reply": "Gorev metni 1-500 karakter olmali."}), 400
-        fields: dict[str, Any] = {"text": new_text.strip()}
+        fields: dict[str, Any] = {"text": " ".join(new_text.split())}
         if new_due is not None:
             tz = zone(cfg.timezone)
             parsed = parse_iso(new_due, tz)

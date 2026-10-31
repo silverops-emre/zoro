@@ -1,8 +1,9 @@
 import json
+from datetime import datetime
 
 import pytest
 
-from conftest import Harness, at, call, ms, resp
+from conftest import TZ, Harness, at, call, ms, resp
 from zoro.brain import yes_no
 from zoro.timeutil import DAILY_MS
 
@@ -110,7 +111,7 @@ def test_complete_and_edit_and_snooze(h):
     h.script(resp(calls=[call("edit_task", task_id=ref, text=None, due_at=at(1, 15))]), resp("Saat 15:00'e aldım."))
     out = h.ask("raporu yarın 3'e al")
     assert out["action"] == "add_task" and out["alarm_id"] == task["id"]  # same alarm id = reschedule
-    assert [a["type"] for a in out["actions"]] == ["cancel_reminder", "schedule_reminder"]
+    assert [a["type"] for a in out["actions"]] == ["schedule_reminder"]
 
     h.script(resp(calls=[call("snooze_task", task_id=ref, minutes=30)]), resp("30 dakika erteledim."))
     out = h.ask("raporu yarım saat ertele")
@@ -140,7 +141,7 @@ def _delete_question(h):
 def test_delete_asks_first_and_deletes_on_yes(h):
     task, out = _delete_question(h)
     assert out["expect_reply"] is True and out["pending"]
-    assert "sileyim mi" in out["reply"]
+    assert "silinsin mi" in out["reply"]
     assert out["action"] == ""  # nothing cancelled on the phone yet
     assert h.store.get_task(task["id"]) is not None
 
@@ -183,7 +184,7 @@ def test_clear_all_needs_confirmation(h):
         h.store.add_task(f"g{i}", at(1, 10 + i), 0)
     h.script(resp(calls=[call("clear_tasks")]))
     out = h.ask("tüm görevlerimi sil")
-    assert "3 görevin hepsini" in out["reply"]
+    assert "3 görevin hepsi silinsin mi" in out["reply"]
     out = h.ask("evet")
     assert out["action"] == "clear_tasks" and len(out["cancel_alarm_ids"]) == 3
     assert h.store.list_tasks() == []
@@ -194,6 +195,9 @@ def test_clear_all_needs_confirmation(h):
     ("hayır", "no"), ("vazgeç", "no"), ("silme", "no"), ("iptal etme", "no"), ("tamam ama silme", "no"),
     ("Silivri", None), ("yarın ne var", None), ("bugün hava nasıl olacak acaba söyler misin", None),
     ("çok güzel", None), ("durum ne", None),
+    # review r1: these used to delete
+    ("Peki saat kaç", None), ("olur mu acaba", None), ("tamam annemi ara", None), ("sil diğerini", None),
+    ("tamam sileme", None), ("Zoro devam et müziği", None), ("evet mi?", None), ("evet lütfen", "yes"),
 ])
 def test_yes_no(text, expected):
     assert yes_no(text) == expected
@@ -263,7 +267,7 @@ def test_calendar_delete_confirmation_flow(h):
     cal = [_event("z1", "Silivri toplantısı", start)]
     h.script(resp(calls=[call("calendar_delete", event_id="e1")]))
     out = h.ask("silivri toplantısını iptal et", v2=True, calendar=cal)
-    assert "sileyim mi" in out["reply"] and out["actions"] == []
+    assert "silinsin mi" in out["reply"] and out["actions"] == []
     out = h.ask("evet", v2=True, calendar=cal)
     assert out["actions"] == [{"type": "calendar_delete", "event_id": "z1", "title": "Silivri toplantısı"}]
 
@@ -386,3 +390,136 @@ def test_reply_is_tts_friendly(h):
     h.script(resp("Yarın 14:00–15:00 arası toplantınız var — yağış ihtimali %20."))
     out = h.ask("yarın ne var")
     assert out["reply"] == "Yarın 14:00 ile 15:00 arası toplantınız var, yağış ihtimali yüzde 20."
+
+
+# ------------------------------------------------- review r1 regressions
+
+def test_say_path_also_closes_an_unanswered_question(h):
+    task, _ = _delete_question(h)
+    h.script(resp(calls=[call("add_task", text="Okay'ı ara", due_at=at(1, 9), repeat="none", say="Kurdum.")]))
+    h.ask("yarın sabah dokuzda okayı aramamı hatırlat lütfen")
+    h.script(resp("Neye tamam?"))
+    h.ask("tamam")
+    assert h.store.get_task(task["id"]) is not None
+
+
+def test_ai_down_closes_the_question_too(h):
+    task, _ = _delete_question(h)
+    h.script(RuntimeError("down"))
+    h.ask("bugün hava nasıl olacak acaba")
+    h.script(resp("?"))
+    h.ask("tamam")
+    assert h.store.get_task(task["id"]) is not None
+
+
+def test_offline_fallback_handles_9da_without_500(h):
+    h.script(RuntimeError("down"))
+    out = h.ask("yarın 9da ilaç içmeyi hatırlat")
+    assert out["error"] == "ai_unavailable" and out["action"] == "add_task"
+    assert "T09:00" in out["due_at"]
+
+
+def test_round_two_failure_does_not_duplicate_the_reminder(h):
+    h.script(resp(calls=[call("add_task", text="İlaç iç", due_at=at(1, 9), repeat="none")]), RuntimeError("timeout"))
+    out = h.ask("yarın saat 9 ilaç içmeyi hatırlat")
+    assert len(h.store.list_tasks()) == 1
+    assert out["action"] == "add_task" and "İlaç iç" in out["reply"]
+
+
+def test_v1_app_gets_one_alarm_per_turn(h):
+    h.script(resp(calls=[call("add_task", text="İlaç", due_at=at(1, 9), repeat="none"),
+                         call("add_task", text="Toplantı", due_at=at(1, 10), repeat="none")]),
+             resp("İlacı kurdum, toplantıyı ayrıca söyleyin."))
+    out = h.ask("yarın 9'da ilaç 10'da toplantı hatırlat")
+    assert [t["text"] for t in h.store.list_tasks()] == ["İlaç"]
+    assert h.tool_output(1, 1)["ok"] is False
+    assert out["task_text"] == "İlaç"
+
+
+def test_v2_app_gets_every_alarm(h):
+    h.script(resp(calls=[call("add_task", text="İlaç", due_at=at(1, 9), repeat="none", say="Tamam."),
+                         call("add_task", text="Toplantı", due_at=at(1, 10), repeat="none", say="Tamam.")]))
+    out = h.ask("yarın 9'da ilaç 10'da toplantı hatırlat", v2=True)
+    assert [a["type"] for a in out["actions"]] == ["schedule_reminder", "schedule_reminder"]
+
+
+def test_completing_a_daily_reminder_keeps_the_series(h):
+    task = h.store.add_task("Tansiyon ilacı", at(1, 9), DAILY_MS)
+    h.script(resp(calls=[call("complete_task", task_id="t:" + task["id"][:6])]), resp("Tamam, yarın yine hatırlatırım."))
+    out = h.ask("ilacımı içtim")
+    assert h.store.get_task(task["id"])["done"] is False
+    assert out["actions"] == [] and out["action"] == ""
+    assert h.tool_output(1)["tekrar_devam"] is True
+
+
+def test_editing_an_old_daily_task_rearms_the_next_occurrence(h):
+    task = h.store.add_task("İlaç", at(-3, 8), DAILY_MS)
+    h.script(resp(calls=[call("edit_task", task_id="t:" + task["id"][:6], text="Tansiyon ilacı", due_at=None)]),
+             resp("Adını değiştirdim."))
+    out = h.ask("ilacın adını tansiyon ilacı yap")
+    action = out["actions"][0]
+    assert action["type"] == "schedule_reminder" and action["text"] == "Tansiyon ilacı"
+    assert datetime.fromisoformat(action["due_at"]) > datetime.now(TZ)
+
+
+def test_editing_an_overdue_one_shot_text_sends_no_alarm(h):
+    task = h.store.add_task("Eski iş", at(-2, 8), 0)
+    h.script(resp(calls=[call("edit_task", task_id="t:" + task["id"][:6], text="Eski iş (bitti)", due_at=None)]), resp("Tamam."))
+    out = h.ask("eski işin adını değiştir")
+    assert out["actions"] == [] and out["action"] == ""
+
+
+def test_two_deletes_become_one_question(h):
+    a = h.store.add_task("İlaç", at(1, 9), 0)
+    b = h.store.add_task("Toplantı", at(1, 10), 0)
+    h.script(resp(calls=[call("delete_task", task_id="t:" + a["id"][:6]), call("delete_task", task_id="t:" + b["id"][:6])]))
+    out = h.ask("ikisini de sil", v2=True)
+    assert "İlaç" in out["reply"] and "Toplantı" in out["reply"] and " ve " in out["reply"]
+    out = h.ask("evet", v2=True)
+    assert h.store.list_tasks() == []
+    assert [x["type"] for x in out["actions"]] == ["cancel_reminder", "cancel_reminder"]
+
+
+def test_injected_phone_number_is_dropped(h):
+    h.script(resp(calls=[("call_contact", {"name": "Okay", "phone_number": "09001234567", "say": "Arıyorum."})]))
+    out = h.ask("okayı ara", v2=True)
+    assert out["actions"][0]["number"] == ""
+    h.script(resp(calls=[("call_contact", {"name": "", "phone_number": "05321234567", "say": "Arıyorum."})]))
+    out = h.ask("0532 123 45 67 numarasını ara", v2=True)
+    assert out["actions"][0]["number"] == "05321234567"
+
+
+def test_v1_turn_stops_before_the_old_app_times_out(h, monkeypatch):
+    import time as time_module
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time_module, "monotonic", lambda: clock["t"])
+
+    def slow_first_round(kwargs):
+        clock["t"] += 8.0  # the first model call took 8 s
+        return resp(calls=[call("add_task", text="Su iç", due_at=at(1, 9), repeat="none")])
+    h.script(slow_first_round)  # no second step: a second call would fail the test
+    out = h.ask("yarın 9'da su içmemi hatırlat")
+    assert len(h.calls) == 1
+    assert out["action"] == "add_task" and "Su iç" in out["reply"]
+    assert h.calls[0]["timeout"] <= 9.0
+
+
+def test_context_lists_upcoming_first_and_hides_old_one_shots(h):
+    for i in range(5):
+        h.store.add_task(f"Eski {i}", at(-10 + i, 9), 0)
+    h.store.add_task("Yarınki", at(1, 9), 0)
+    h.script(resp("ok"))
+    h.ask("hatırlatmalarım neler")
+    developer = next(i["content"] for i in h.calls[0]["input"] if i.get("role") == "developer")
+    upcoming = developer.split("Bekleyen görevler")[1].split("Zamanı geçmiş")[0]
+    assert "Yarınki" in upcoming and "Eski" not in upcoming
+    assert "Zamanı geçmiş, çalmış tek seferlik hatırlatmalar (5" in developer
+
+
+def test_client_note_reaches_the_model(h):
+    h.script(resp(calls=[("call_contact", {"name": "Okay Demir", "phone_number": None, "say": "Okay Demir'i arıyorum."})]))
+    r = h.client.post("/ask", json={"message": "Demir olanı", "client": {"version": 2, "capabilities": ["call"]},
+                                     "context": {"client_note": "Rehberde birden fazla Okay var: Okay Demir, Okay Yılmaz. Hangisi olduğunu söyler misiniz?"}})
+    developer = next(i["content"] for i in h.calls[0]["input"] if i.get("role") == "developer")
+    assert "Telefonun son notu" in developer and "Okay Yılmaz" in developer
+    assert r.get_json()["actions"][0]["name"] == "Okay Demir"

@@ -82,6 +82,10 @@ class Turn:
     pending_created: dict[str, Any] | None = None
     tools_called: list[str] = field(default_factory=list)
     says: list[str] = field(default_factory=list)
+    confirm_items: list[dict[str, Any]] = field(default_factory=list)
+    message: str = ""
+    client_note: str = ""  # what the phone did/asked after the last reply
+    deadline: float | None = None  # time.monotonic() limit for this turn
 
     def set_legacy(self, fields: dict[str, Any]) -> None:
         # The v1 app understands a single action per response: keep the first.
@@ -94,6 +98,14 @@ class Turn:
             if ev.ref == ref or ev.id == ref:
                 return ev
         return None
+
+
+def legacy_slot_busy(turn: Turn) -> dict[str, Any] | None:
+    """The v1 app executes one alarm action per response. Refuse a second one."""
+    if not turn.client.can(CAP_REMINDERS) and turn.legacy is not None:
+        return {"ok": False, "error": "Eski uygulama tek seferde yalnızca bir hatırlatmayı telefona kurabilir. "
+                                       "Bunu kullanıcıya söyle; diğerini ayrıca istesin."}
+    return None
 
 
 def ok(**data: Any) -> dict[str, Any]:
@@ -202,6 +214,8 @@ def t_add_task(turn: Turn, text: str, due_at: str | None, repeat: str) -> dict[s
         due_iso = iso(due)  # type: ignore[arg-type]
     elif interval:
         return fail("Günlük tekrar için saat gerekli.")
+    if due_iso and (busy := legacy_slot_busy(turn)):
+        return busy
     task = turn.store.add_task(text, due_iso, interval)
     if due_iso:
         turn.actions.append(reminder_action(task))
@@ -216,6 +230,13 @@ def t_complete_task(turn: Turn, task_id: str) -> dict[str, Any]:
         return fail(error)
     if task["done"]:  # type: ignore[index]
         return ok(zaten_tamamlanmis=True)
+    if task.get("repeat_interval") == DAILY_MS:  # type: ignore[union-attr]
+        # "İlacımı içtim" must not end a daily medication reminder.
+        turn.notes.append(f"{task['text']} bugünlük tamam, her gün hatırlatmaya devam")  # type: ignore[index]
+        return ok(bugunluk_tamam=True, tekrar_devam=True,
+                  not_="Günlük hatırlatma sürüyor. Tamamen durdurmak isterse delete_task gerekir.")
+    if busy := legacy_slot_busy(turn):
+        return busy
     task = turn.store.update_task(task["id"], done=True, notified=True)  # type: ignore[index]
     turn.actions.append(cancel_action(task))  # type: ignore[arg-type]
     turn.set_legacy(legacy_cancel("complete_task", task))  # type: ignore[arg-type]
@@ -258,6 +279,8 @@ def t_snooze_task(turn: Turn, task_id: str | None, minutes: int) -> dict[str, An
         task = candidates[0]
     if task["done"]:  # type: ignore[index]
         return fail("Tamamlanmış görev ertelenemez.")
+    if busy := legacy_slot_busy(turn):
+        return busy
     due = turn.now + timedelta(minutes=int(minutes))
     # Daily master task stays; snooze is a separate one-shot task (v1 behaviour).
     new = turn.store.add_task(task["text"], iso(due), 0)  # type: ignore[index]
@@ -282,10 +305,17 @@ def t_edit_task(turn: Turn, task_id: str, text: str | None, due_at: str | None) 
         fields["notified"] = False
     if not fields:
         return fail("Değişecek bir şey verilmedi.")
+    due = parse_iso(fields.get("due_at") or task.get("due_at"), turn.tz)  # type: ignore[union-attr]
+    if due is not None and task.get("repeat_interval") == DAILY_MS and due < turn.now:  # type: ignore[union-attr]
+        # Daily tasks keep their first date; re-arm the next occurrence, not a past one.
+        fields["due_at"] = iso(next_occurrence_daily(due, turn.now))
+        due = parse_iso(fields["due_at"], turn.tz)
+    rearm = due is not None and due > turn.now and not task["done"]  # type: ignore[index]
+    if rearm and (busy := legacy_slot_busy(turn)):
+        return busy
     updated = turn.store.update_task(task["id"], **fields)  # type: ignore[index]
-    if updated and updated.get("due_at") and not updated["done"]:
-        # Same alarm_id: the phone replaces the existing alarm.
-        turn.actions.append(cancel_action(task))  # type: ignore[arg-type]
+    if rearm and updated:
+        # Same alarm_id: the phone replaces the existing alarm in place.
         turn.actions.append(reminder_action(updated))
         turn.set_legacy(legacy_add(updated))
     turn.notes.append(f"{updated['text']} güncellendi ({task_when(turn, updated)})")  # type: ignore[index]
@@ -296,15 +326,15 @@ def t_delete_task(turn: Turn, task_id: str) -> dict[str, Any]:
     task, error = resolve_task(turn, task_id)
     if error:
         return fail(error)
-    question = f"{task['text']} ({task_when(turn, task)}) hatırlatmasını sileyim mi?"  # type: ignore[index]
-    return request_confirmation(turn, "delete_task", {"task_id": task["id"]}, question)  # type: ignore[index]
+    label = f"{task['text']} ({task_when(turn, task)}) hatırlatması"  # type: ignore[index]
+    return request_confirmation(turn, "delete_task", {"task_id": task["id"]}, label)  # type: ignore[index]
 
 
 def t_clear_tasks(turn: Turn) -> dict[str, Any]:
     count = len(turn.store.list_tasks())
     if not count:
         return fail("Kayıtlı görev yok.")
-    return request_confirmation(turn, "clear_tasks", {}, f"Kayıtlı {count} görevin hepsini sileyim mi?")
+    return request_confirmation(turn, "clear_tasks", {}, f"kayıtlı {count} görevin hepsi")
 
 
 def t_remember(turn: Turn, text: str, key: str | None) -> dict[str, Any]:
@@ -329,7 +359,7 @@ def t_forget(turn: Turn, fact_id: str) -> dict[str, Any]:
     if error:
         return fail(error)
     return request_confirmation(turn, "forget_fact", {"fact_id": fact["id"]},  # type: ignore[index]
-                                f"\"{fact['text']}\" bilgisini hafızamdan sileyim mi?")  # type: ignore[index]
+                                f"hafızadaki \"{fact['text']}\" bilgisi")  # type: ignore[index]
 
 
 def t_get_weather(turn: Turn, city: str | None) -> dict[str, Any]:
@@ -438,7 +468,7 @@ def t_calendar_delete(turn: Turn, event_id: str) -> dict[str, Any]:
         return fail("Bu etkinlik telefonun takviminden geliyor, Zoro silemez.")
     return request_confirmation(
         turn, "calendar_delete", {"event_id": ev.id, "title": ev.title},
-        f"{describe_event(turn, ev)} etkinliğini takvimden sileyim mi?",
+        f"{describe_event(turn, ev)} etkinliği",
     )
 
 
@@ -454,6 +484,11 @@ def t_navigate(turn: Turn, destination: str, mode: str) -> dict[str, Any]:
 def t_call_contact(turn: Turn, name: str, phone_number: str | None) -> dict[str, Any]:
     name = clean_text(name, 80)
     number = "".join(ch for ch in str(phone_number or "") if ch.isdigit() or ch == "+")
+    said = "".join(ch for ch in turn.message if ch.isdigit())
+    if number and number.lstrip("+")[-7:] not in said:
+        # A number that did not come from the user (calendar text, memory,
+        # web result) is never dialled.
+        number = ""
     if not name and not number:
         return fail("Kimin aranacağı belli değil.")
     turn.actions.append({"type": "call", "name": name, "number": number})
@@ -498,18 +533,46 @@ def t_set_timer(turn: Turn, seconds: int, label: str | None) -> dict[str, Any]:
 
 # ---------------------------------------------------------- confirmations
 
-def request_confirmation(turn: Turn, kind: str, payload: dict[str, Any], question: str) -> dict[str, Any]:
-    pending = turn.store.create_pending(kind, payload, question, turn.now, turn.cfg.confirm_ttl_s)
-    turn.pending_created = pending
-    return ok(durum="onay_bekleniyor", soru=question,
+def request_confirmation(turn: Turn, kind: str, payload: dict[str, Any], label: str) -> dict[str, Any]:
+    """Queue a destructive step; the brain asks one question for all of them."""
+    turn.confirm_items.append({"kind": kind, "payload": payload, "label": label})
+    return ok(durum="onay_bekleniyor",
               not_="Henüz hiçbir şey silinmedi. Kullanıcı evet derse silinecek.")
+
+
+def _join_tr(parts: list[str]) -> str:
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " ve " + parts[-1]
+
+
+def open_confirmation(turn: Turn) -> dict[str, Any] | None:
+    """Store the queued destructive steps as one pending question."""
+    items = turn.confirm_items
+    if not items:
+        return None
+    extra = ""
+    if len(items) > 1 and not turn.client.can(CAP_REMINDERS):
+        # The v1 app can cancel one alarm per response.
+        items, extra = items[:1], " Diğerini bundan sonra ayrıca söyleyin."
+    question = _join_tr([i["label"] for i in items]) + " silinsin mi?" + extra
+    question = question[0].upper() + question[1:]
+    if len(items) == 1:
+        kind, payload = items[0]["kind"], items[0]["payload"]
+    else:
+        kind, payload = "multi", {"items": items}
+    turn.pending_created = turn.store.create_pending(kind, payload, question, turn.now, turn.cfg.confirm_ttl_s)
+    return turn.pending_created
 
 
 def execute_pending(turn: Turn, pending: dict[str, Any]) -> str:
     """Run a confirmed destructive action. Returns the spoken result."""
     if not turn.store.close_pending(pending["id"], "done"):
         return "Bu işlem zaten sonuçlanmış."
-    kind, payload = pending["kind"], pending["payload"]
+    if pending["kind"] == "multi":
+        return " ".join(_execute_one(turn, i["kind"], i["payload"]) for i in pending["payload"]["items"])
+    return _execute_one(turn, pending["kind"], pending["payload"])
+
+
+def _execute_one(turn: Turn, kind: str, payload: dict[str, Any]) -> str:
     if kind == "delete_task":
         task = turn.store.delete_task(payload["task_id"])
         if task is None:
@@ -644,7 +707,7 @@ _register(CAP_OPEN_APP, _fn("open_app", "Telefonda bir uygulamayı açar; query 
     "app": {"type": "string", "enum": OPEN_APPS},
     "query": S_NULL,
 }), t_open_app)
-_register(CAP_ALARM, _fn("set_alarm", "Telefonun saat uygulamasında alarm kurar (uyandırma).", {
+_register(CAP_ALARM, _fn("set_alarm", "Telefonun saat uygulamasında alarm kurar (uyandırma). Alarm bu saatin BİR SONRAKİ gelişinde çalar, yani en geç 24 saat içinde. Daha ileri bir gün için add_task kullan. say alanında gün adı söyleme, yalnızca saati söyle.", {
     "time": {**S, "description": "SS:DD, 24 saat."},
     "label": S_NULL,
 }), t_set_alarm)

@@ -23,3 +23,7 @@ signing.properties
 
 # Android server secrets
 android/zoro.properties
+*.db-wal
+*.db-shm
+*.db-journal
+zoro.db*
