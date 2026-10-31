@@ -1,0 +1,22 @@
+# KVKK: kişisel veri ve sırlar asla commit edilmez
+backend/data-local/
+backend/data/
+*.db
+*.sqlite3
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+# Android
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+android/.idea/
+android/.kotlin/
+*.keystore
+*.jks
+signing.properties
