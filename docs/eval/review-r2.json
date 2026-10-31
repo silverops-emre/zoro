@@ -1,0 +1,156 @@
+[
+ {
+  "title": "Turn budget still breaks the gunicorn worker timeout: the SDK retries timeouts, and the committed v2 budget is 55 s",
+  "severity": "medium",
+  "file": "backend/zoro/brain.py",
+  "line": 253,
+  "scenario": "In 9ee24e0, web.py:129 sets the v2 deadline to 55 s. Brain._create caps each call at min(openai_timeout_s=30, remaining), which is a 30 s first call, and keeps max_retries=1 because more than 15 s remain. gunicorn's default --timeout is 30 s, and deploy.sh assumes it. So when OpenAI stalls on a v2 turn, the worker is killed before AIUnavailable or the offline fallback can run, and the phone gets a 502 or a dropped connection. The uncommitted working-tree change (turn_budget_v2_s=25) only partly fixes this. The first call still gets timeout=25 with max_retries=1, because 25 is not below 15. openai/_base_client.py retries on timeout_exceptions(), so the worst case is about 2 x 25 s plus backoff, which is past 30 s and the worker dies. The same happens in round 2 whenever 15 to 25 s remain. If round 1 already ran add_task, the task is saved in SQLite but the schedule_reminder action never reaches the phone, so no alarm rings.",
+  "fix": "Whenever turn.deadline is set, use client.with_options(max_retries=0), or allow a retry only when 2*timeout + 1 <= remaining. Commit the config.py and web.py budget change (V2 = 25 s, below the gunicorn timeout), and assert in deploy.sh that ZORO_TURN_BUDGET_V2 + 3 < gunicorn --timeout.",
+  "lens": "backend",
+  "verdict": {
+   "real": false,
+   "evidence": "The claim assumes gunicorn kills a worker that spends more than 30 s inside a request, but the documented deployment command makes that unlikely. backend/app.py:3 gives `gunicorn --workers 2 --threads 4 --bind 127.0.0.1:5050 app:app`. Passing `--threads` greater than 1 selects the gthread worker class. In gthread the worker's main loop sends the arbiter heartbeat (`notify`) itself, while requests run in pool threads. A request thread that is blocked for 50 s in an OpenAI call therefore does not trip `--timeout`, because only a stalled main loop would. That timeout kill applies to sync workers. The code comments and deploy.sh (line 48) also assume the 30 s limit applies, but I found no evidence it does for this worker class. I could not read the real systemd unit, which lives on the server, so the evidence is the documented command. If that command is accurate, the scenario cannot happen at either the committed 55 s budget or the uncommitted 25 s one. Without a timeout kill, the SDK retry only lengthens the turn. At worst a v2 turn takes about 2x25 s plus backoff, which is under the 60 s the v2 app waits, so AIUnavailable and the offline fallback still run. The unmet `with_options(max_retries=0)` condition at brain.py:253 (it only applies when under 15 s remain) is a small inefficiency. It does not cause worker death or a lost schedule_reminder action.",
+   "adjusted_severity": "none"
+  }
+ },
+ {
+  "title": "YES_PHRASES contains \"iptal et\": answering \"cancel\" to a delete question runs the delete without the model",
+  "severity": "medium",
+  "file": "backend/zoro/brain.py",
+  "line": 172,
+  "scenario": "Pending question: \"Kayıtlı 12 görevin hepsi silinsin mi?\" The user wants to abort and says \"iptal et\" (also \"evet iptal et\" or \"tamam iptal et\"), the usual Turkish way to cancel an operation. yes_no('iptal et') returns 'yes' (verified), so Brain._answer calls execute_pending -> clear_tasks directly, and all tasks plus their alarms are deleted with no model call. \"iptal\" alone and \"İptal et\" with a capital İ go to the model (lower() keeps the combining dot), so the outcome depends on capitalisation in the STT output.",
+  "fix": "Remove \"iptal et\", \"evet iptal et\" and \"tamam iptal et\" from YES_PHRASES, so \"iptal\" phrasing goes to the model with confirm_pending. Optionally add a test asserting yes_no('iptal et') is None.",
+  "lens": "backend",
+  "verdict": {
+   "real": true,
+   "evidence": "Verified in backend/zoro/brain.py. YES_PHRASES (line 172) contains \"iptal et\", \"evet iptal et\" and \"tamam iptal et\". NO_RE only matches \"iptal etme\", so it does not catch \"iptal et\". I ran yes_no() with the project venv: \"iptal et\", \"evet iptal et\" and \"tamam iptal et\" all return \"yes\". \"İptal et\" (capital İ), \"iptal\" alone and a phrase with \"?\" return None and go to the model. In Brain._answer (line ~278) a \"yes\" decision calls execute_pending(turn, turn.pending) directly. That means a pending destructive confirmation such as \"delete all tasks?\" is executed with no model call when the user says \"iptal et\". The scenario can happen. The outcome depends on whether the STT output is capitalised, because lower() leaves the combining dot on İ.",
+   "adjusted_severity": "high"
+  }
+ },
+ {
+  "title": "Exact-name contact with two numbers is still dialled directly (ACTION_CALL) to whichever number comes first",
+  "severity": "medium",
+  "file": "android/app/src/main/java/com/zaferyilmaz/zoro/ZoroActions.kt",
+  "line": 494,
+  "scenario": "The contact \"Okay\" has two numbers (mobile and office). findContacts puts both rows at level 0, and distinctBy(last 10 digits) keeps both. names.distinct() has size 1, so resolveNumber takes the else branch: Resolved(matches.first().number, trusted = level<=1). call() then fires ACTION_CALL to the first cursor row, which may be the wrong line, with no question asked. Round-1 finding 22 explicitly asked for 'matches.size>1 && names.size==1 -> ask which number'. The commit message claims 'direct calls only for an exact contact-name match', but this case is still an unconfirmed call to an arbitrary number.",
+  "fix": "In resolveNumber, add a branch before else: if search.matches.size > 1, return Resolved(null, \"$name için birden fazla numara var: <son 4 hane listesi>. Hangisini arayayım?\", false). Or use ACTION_DIAL with trusted=false when there is more than one match.",
+  "lens": "backend",
+  "verdict": {
+   "real": true,
+   "evidence": "In ZoroActions.kt, findContacts keeps every row at the best level and de-duplicates only by the last 10 digits. A contact \"Okay\" with a mobile and an office number gives two matches at level 0. In resolveNumber, `names = matches.map{name}.distinct()` has size 1. The `names.size > 1` branch is skipped and the else branch (line ~495) returns `Resolved(matches.first().number, null, trusted = level <= 1)`, which is trusted=true. call() then sets direct = canCall && trusted and fires ACTION_CALL to the first cursor row, with no question about which line. Nothing checks `matches.size > 1` for a single name. The commit's rule of calling directly only on an exact name match still allows an unconfirmed call to an arbitrary one of the contact's numbers.",
+   "adjusted_severity": "medium"
+  }
+ },
+ {
+  "title": "Deadline and AI-failure replies are built only from turn.notes, which hide refused alarms and executed deletes",
+  "severity": "low",
+  "file": "backend/zoro/brain.py",
+  "line": 319,
+  "scenario": "(1) v1 app: \"yarın 9'da ilacımı, 10'da Okay'ı aramamı hatırlat\". The model calls add_task twice. The second call is refused by legacy_slot_busy, so says has 1 entry for 2 calls and round 2 is needed. If the first OpenAI call took 6.5 s or more, _time_left is below 2.5 and the reply is just \"İlaç iç hatırlatması yarın 09:00 için kuruldu.\" The user is never told the second reminder was not set, so round-1 finding 18 is incomplete on this path. (2) t_confirm_pending('yes') runs execute_pending but appends no note (verified: notes=[] after clear_tasks executed). Example: \"evet hepsini sil\" goes to the model and confirm_pending deletes everything. If round 2 then times out, the reply is \"Gerisini tamamlayamadım, tekrar dener misiniz?\" (web.py:137), or \"Biraz yavaş kaldım, tekrar söyler misiniz?\" (brain.py:319), although the delete already happened.",
+  "fix": "In t_confirm_pending, append the execute_pending result to turn.notes. In execute(), record failed tool errors on the turn (e.g. turn.failures) and add them to the deadline and AIUnavailable replies, e.g. \"... kuruldu. Diğer hatırlatmayı eski uygulama aynı anda kuramadı, ayrıca söyleyin.\"",
+  "lens": "backend",
+  "verdict": {
+   "real": true,
+   "evidence": "I read backend/zoro/brain.py and tools.py. The claim holds. At brain.py:319, when `_time_left(turn) < 2.5`, the reply is built only from `turn.notes`, or the generic \"Biraz yavaş kaldım...\" line if there are none. A failed tool call returns `fail(...)` in `execute()` (tools.py:736-764). It appends nothing to `turn.notes` and records nothing else on the turn. So a refused second add_task, such as one rejected by legacy_slot_busy, is not in the deadline reply or the AIUnavailable reply built from `turn.notes` (web.py:137). The reply would say only that the first reminder was set. `t_confirm_pending` with \"yes\" (tools.py:379-384) calls `execute_pending` and returns `ok(sonuc=reply)` without appending a note, unlike every other successful tool and the \"no\" branch (line 386). If the model calls confirm_pending, executes the delete, and round 2 hits the deadline or an AI error, the user gets the generic \"tekrar söyler misiniz\" reply even though the delete already ran. It needs a slow first OpenAI call (the v1 app gives up after 10 s), so it only happens on slow turns. The cost is a misleading spoken reply: the user retries or never learns a reminder was refused. No data is corrupted, so this is medium to low severity.",
+   "adjusted_severity": "medium"
+  }
+ },
+ {
+  "title": "edit_task rejects an earlier-today time for a daily reminder before the daily roll-forward runs",
+  "severity": "low",
+  "file": "backend/zoro/tools.py",
+  "line": 301,
+  "scenario": "At 10:00, a daily 09:00 'İlaç iç' exists. The user says \"ilaç hatırlatmasını 08:00'e çek\" and the model passes due_at=today 08:00. parse_future fails first with 'Yeni zaman geçmişte kalıyor (bugün 08:00)' (verified), so the daily next_occurrence_daily roll at line 309 is never reached. t_add_task does the roll before parse_future, so the two tools behave differently. The model needs a second round to retry with tomorrow's date. On the v1 app's 9 s budget that round is often skipped, and the user hears \"Biraz yavaş kaldım\" and the edit is never applied.",
+  "fix": "As in t_add_task: if the task is daily and the parsed due_at is before now, set due_at = iso(next_occurrence_daily(parsed, turn.now)) before calling parse_future.",
+  "lens": "backend",
+  "verdict": {
+   "real": true,
+   "evidence": "In backend/zoro/tools.py, t_edit_task calls parse_future(turn, due_at, \"Yeni zaman\") first (lines ~298-301). parse_future (lines 183-191) returns the error \"... geçmişte kalıyor\" whenever dt < now - 60s, and t_edit_task then returns fail(error). The daily roll at line ~309 (`task.get(\"repeat_interval\") == DAILY_MS and due < turn.now` -> next_occurrence_daily) is therefore unreachable for any caller-supplied past due_at. At 10:00 a due_at of today 08:00 on a daily task fails before the roll. The only inputs that reach the roll are a text-only edit of a daily task whose stored due_at is already past, or a due_at within the 60 s grace window. t_add_task (lines 206-211) does the roll before parse_future, so the two tools do differ. The failure is a recoverable error. The model can retry with tomorrow's date, and the error message gives the current time. The impact is an extra model round, and possibly a timeout on a tight budget, not data loss or a wrong edit. I did not verify the 9 s budget claim. The fix proposed in the claim is correct.",
+   "adjusted_severity": "low"
+  }
+ },
+ {
+  "title": "Regression: short numbers such as 112, 155 and 182 can no longer be called because resolveNumber now needs at least 7 digits",
+  "severity": "high",
+  "file": "android/app/src/main/java/com/zaferyilmaz/zoro/ZoroActions.kt",
+  "line": 468,
+  "scenario": "The user says \"112'yi ara\". Backend t_call_contact keeps number=\"112\" because those digits appear in the message, and sends {type:call, name:\"\"|\"112\", number:\"112\"}. On the phone, resolveNumber sees spokenNumber.count{isDigit} = 3, which is below 7, so it skips the number and calls findContacts(name). With a blank name, findContacts returns ContactSearch(emptyList) and the user hears \"Rehberde  adında birini bulamadım.\" With name \"112\" no contact matches either. Before 9ee24e0, `spokenNumber.any { it.isDigit() }` passed the number through and the call was dialled. Emergency and short service numbers (112, 155, 110, 177, 182) all fail now.",
+  "fix": "Accept any server-supplied number that has at least 3 digits. The server already checks that the user said it. Keep it trusted=false so it opens the dialler with ACTION_DIAL. Use the 7-digit threshold only to decide whether a message `recipient` string is a phone number.",
+  "lens": "android",
+  "verdict": {
+   "real": true,
+   "evidence": "Android ZoroActions.kt resolveNumber (~line 468) only accepts a server-supplied number if spokenNumber.count{isDigit} >= 7. Otherwise it falls through to findContacts(activity, name). Backend t_call_contact (backend/zoro/tools.py:484) keeps number=\"112\" when \"112\" is in the user's message. The check is number.lstrip(\"+\")[-7:] not in said, and a 3-digit string is its own suffix. It then emits {type:call, name, number:\"112\"}. On the phone, a blank name makes the contact lookup fail and the user hears \"Rehberde  adında birini bulamadım.\" A name of \"112\" matches no contact either. The previous any-digit check let the number through to ACTION_DIAL, so 112, 155, 110, 177 and 182 are now uncallable by voice. The regression is real. I rate it high because it affects emergency numbers. Fix: accept at least 3 digits for server-supplied numbers in the call path, and keep 7 digits only for deciding whether a message recipient is a number.",
+   "adjusted_severity": "high"
+  }
+ },
+ {
+  "title": "A contact name with two different numbers is treated as unambiguous and the first number is dialled directly",
+  "severity": "medium",
+  "file": "android/app/src/main/java/com/zaferyilmaz/zoro/ZoroActions.kt",
+  "line": 481,
+  "scenario": "The phone book holds two entries with the same display name, for example \"Annem\" with an old and a new number (common on an elderly user's phone), or two different people both saved as \"Okay\". findContacts puts both at level 0 and distinctBy(number) keeps both. resolveNumber checks only `names.distinct().size > 1`, which is 1, so it returns matches.first().number with trusted=true (level 0). call() then fires ACTION_CALL to whichever row the unsorted cursor returned first, with no question. That can ring the wrong person, which contradicts the commit's claim that direct calls happen only for an unambiguous exact match.",
+  "fix": "Set trusted=true only when there is exactly one distinct number after normalisation. If one name has several numbers, either ask (\"Annem için iki numara var, cep mi ev mi?\"), using the Phone.TYPE label in the query, or fall back to ACTION_DIAL. Query CONTACT_ID so that two separate people with the same name can be told apart from one person with several numbers.",
+  "lens": "android",
+  "verdict": {
+   "real": true,
+   "evidence": "ZoroActions.kt findContacts queries only DISPLAY_NAME and NUMBER, with no sort order. It puts every row whose lowercased display name equals the wanted name into levels[0]. The only de-duplication is distinctBy on the last 10 digits, so two different numbers under one name both survive. resolveNumber then computes `names = matches.map{it.name}.distinct()`. With two entries both called \"Annem\" that list has size 1, so the `names.size > 1` ambiguity branch is skipped. The else branch returns `Resolved(search.matches.first().number, null, trusted = search.level <= 1)`, and level 0 is trusted. call() then sets `direct = canCall && resolved.trusted` and builds ACTION_CALL, so the first cursor row is dialled with no question and no dial-pad confirmation. This happens whenever one contact has several numbers (Android emits one Phone row per number) or two contacts share a name, and CALL_PHONE is granted. Result: a possibly wrong or outdated number is called directly. The same resolveNumber path also picks the first number for message(), which only opens a draft, so that part is lower impact. I could not refute the claim by reading the code. Severity is medium, not high: the user must have duplicate names, the fix is small, and a single contact with several numbers is a gray area where the commit's own \"exact name match\" comment is technically satisfied.",
+   "adjusted_severity": "medium"
+  }
+ },
+ {
+  "title": "Background voice calls are still never placed; the fix only posts a notification although TelecomManager.placeCall works without an activity start",
+  "severity": "medium",
+  "file": "android/app/src/main/java/com/zaferyilmaz/zoro/ZoroActions.kt",
+  "line": 265,
+  "scenario": "The phone lies on the table with the screen off and ZoroVoiceService is listening. The user says \"Zoro, Okay'ı ara\". The server replies \"Okay'ı arıyorum\", then after the speech runIntentActions(inForeground=false) posts a notification and Zoro says \"Ekran kapalıyken açamıyorum. Bildirime dokunarak açabilirsiniz.\" No call is made, so the main hands-free use case of round-1 finding #7 still fails. CALL_PHONE is granted and the number is trusted. TelecomManager.placeCall(Uri.fromParts(\"tel\", number, null), Bundle()) places the call through the system Telecom UI without the app starting an activity from the background (not verified on a device in this review). The message also says \"Ekran kapalıyken\" when the screen is on and the user is simply in another app.",
+  "fix": "In call(), when direct (CALL_PHONE granted and trusted) and !inForeground, call getSystemService(TelecomManager::class.java).placeCall(...) inside a try/catch for SecurityException, and use the notification only as the fallback. Change the wording to \"Zoro arka plandayken açamıyorum\".",
+  "lens": "android",
+  "verdict": {
+   "real": true,
+   "evidence": "Code confirms the claim. In ZoroActions.runIntentActions (ZoroActions.kt ~265), when inForeground is false the code only calls notifyAction and adds the failure \"Ekran kapalıyken açamıyorum...\". It never places the call. call() (line 499) only builds an ACTION_CALL or ACTION_DIAL intent. A grep for placeCall and TelecomManager in android/app/src/main finds nothing, so no background call path exists. MainActivity.kt:1626 computes inForeground from lifecycle STARTED, so a screen-off or other-app state always takes the notification route. Round-1 finding #7 (review-r1.json line 97) says hands-free background call is the main use case. Its fix text allows a notification, so the fix was accepted as minimal. The user's call still isn't placed, and Zoro first said \"aranıyor\". The wording is also wrong when the screen is on but the user is in another app. The proposed placeCall route is plausible: TelecomManager.placeCall with CALL_PHONE is not an app activity start, so the background-activity-launch block should not apply. I did not verify this on a device. The notification-only behavior is an incomplete fix for a hands-free feature. The scenario can happen, but it is a degraded UX, not a crash or data loss.",
+   "adjusted_severity": "medium"
+  }
+ },
+ {
+  "title": "Regression: the deferred action of an interrupted reply now always runs, so a newer reply cannot cancel a pending call or navigation",
+  "severity": "low",
+  "file": "android/app/src/main/java/com/zaferyilmaz/zoro/MainActivity.kt",
+  "line": 557,
+  "scenario": "Reply A (\"Annenizi arıyorum ...\" with after = runIntentActions → call) is still being spoken. The user types \"hayır arama\", or taps the mic and says it. Reply B is spoken with QUEUE_FLUSH, so TTS fires onStop(A). onSpeechFinished(A) removes A from afterSpeech and invokes it unconditionally (\"Yarida kesilen eski cevabin isi yine yapilir\"), and the call is placed while B is saying it won't call. Before 9ee24e0, a newer speakThen overwrote afterSpeechId, so A's work was dropped. The same path also runs A's action after onDestroy calls textToSpeech.stop(), for example on rotation (no configChanges declared). It then sees a DESTROYED lifecycle and posts a spurious notification saying the screen is off.",
+  "fix": "Run an entry's after-work only when the utterance completed normally (onDone) or when it is still the current utterance. On onStop with interrupted=true for a non-current id, drop the work, or keep it only if no newer request was started. Pass a 'completed' flag from onDone/onStop into onSpeechFinished.",
+  "lens": "android",
+  "verdict": {
+   "real": true,
+   "evidence": "Verified in MainActivity.kt. speakThen stores the after-work in the afterSpeech map keyed by utterance id. The UtteranceProgressListener routes onDone, onError and onStop all to onSpeechFinished(utteranceId), with no completed or interrupted distinction. onSpeechFinished removes the entry and invokes entry.first unconditionally, with a comment saying interrupted replies still do their work. The after-work in the reply path (about line 1617) calls ZoroActions.runIntentActions, which is the call and navigation action. speak() uses QUEUE_FLUSH, so a newer reply B fires onStop(A) and A's action runs even though B has superseded it. Before 9ee24e0 the single afterSpeechId/afterSpeech pair was overwritten by the newer speakThen, so A's work was dropped. onDestroy calls textToSpeech.stop(), which also fires onStop; the runOnUiThread callback then runs the work after destruction. The later lifecycle check reads DESTROYED, so the code goes down the not-in-foreground path, which per the claim posts the spurious notification (I didn't open that branch). The regression is real. One nuance: the user's typed or spoken cancel also needs a server round trip before B is spoken, but A is still being spoken during that time, so the scenario can happen.",
+   "adjusted_severity": "high"
+  }
+ },
+ {
+  "title": "Background alarm and timer notifications share one PendingIntent and one notification ID, so an earlier alarm is silently replaced",
+  "severity": "low",
+  "file": "android/app/src/main/java/com/zaferyilmaz/zoro/ZoroActions.kt",
+  "line": 307,
+  "scenario": "With Zoro in the background the user says \"7'ye ve 7.30'a alarm kur\", or sets two alarms in separate turns without tapping the first notification. Both Built objects have label \"Alarm kuruluyor\". PendingIntent.getActivity uses requestCode=label.hashCode() and an equal Intent (ACTION_SET_ALARM, no data), so FLAG_UPDATE_CURRENT overwrites the extras of the first one. notify(4100 + (hash & 0xff)) also replaces the first notification. Only the 07:30 alarm can ever be set, yet Zoro says twice \"Bildirime dokunarak açabilirsiniz\". The same happens with set_timer.",
+  "fix": "Use a unique requestCode and notification ID per action, for example an AtomicInteger counter or (System.currentTimeMillis() and 0x7fffffff).toInt() combined with the index. Put the alarm time in the label (\"07:30 alarmı\") so each notification is distinguishable.",
+  "lens": "android",
+  "verdict": {
+   "real": true,
+   "evidence": "In ZoroActions.kt, setAlarm returns Built(label = \"Alarm kuruluyor\") and setTimer returns \"Zamanlayıcı kuruluyor\", a constant label for every alarm or timer. Each background action goes through notifyAction (~line 307). It calls PendingIntent.getActivity(requestCode = label.hashCode(), intent, FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE) and notify(4100 + (label.hashCode() and 0xff)). The intents differ only in extras (hour, minute), and Intent.filterEquals ignores extras. So two alarms in one turn, or two turns without a tap, get the same PendingIntent and UPDATE_CURRENT overwrites the first one's extras. Both also use the same notification ID, so the second notification replaces the first. Only the last alarm remains and it can be set; the earlier one is lost. runIntentActions still adds \"Bildirime dokunarak açabilirsiniz\" for each action, so the user is told both alarms can be set. Timers behave the same way. Triggering requires Zoro to be in the background with notification permission granted. That is the normal background path, so the defect is real. Impact is moderate: a silently lost alarm, with a misleading message.",
+   "adjusted_severity": "medium"
+  }
+ },
+ {
+  "title": "A newly reported reminder failure suppresses the turn's other phone actions without telling the user",
+  "severity": "low",
+  "file": "android/app/src/main/java/com/zaferyilmaz/zoro/MainActivity.kt",
+  "line": 1623,
+  "scenario": "9ee24e0 makes scheduleReminderFromServer return false when the alarm cannot be set, for example when due_at has already passed by the time the response arrives or setSafeAlarm fails. runDataActions adds that failure. The spoken text then becomes only \"X hatırlatması telefonda kurulamadı.\", and `if (serverActions != null && failures.isEmpty())` skips runIntentActions. So \"yarın 9'da ilacımı hatırlat ve annemi ara\" with a failed reminder never calls and never says why. Before the commit, reminder failures were not counted, so the call still went through.",
+  "fix": "Always run the intent actions, and gate them only on failures of the data actions they depend on (none do today). Alternatively, append a sentence saying the remaining actions were not done. Keep clientNote as it is.",
+  "lens": "android",
+  "verdict": {
+   "real": true,
+   "evidence": "In MainActivity.kt, runDataActions failures (lines 1583-1590) replace the spoken reply with only the failure text. The gate at line 1623, `if (serverActions != null && failures.isEmpty())`, then skips runIntentActions entirely, so no call or other intent action runs. The diff of 9ee24e0 shows the schedule_reminder branch now adds \"…hatırlatması telefonda kurulamadı.\" whenever scheduleReminderFromServer returns false. It also adds it when due_at is blank or \"null\", because `scheduled` is false in that case. Before the commit, reminder failures were never added, so a reminder in a mixed request did not block the other actions. The line 1623 gate predates the commit and was already there for calendar failures. 9ee24e0 widens its reach to reminders.\n\nScenario: \"yarın 9'da ilacımı hatırlat ve annemi ara\". The server returns [schedule_reminder, call]. The alarm cannot be set, for example because due_at has already passed or setSafeAlarm fails. The user hears only the reminder failure. The call is never made, and nothing tells them it was skipped. The clientNote only says the reminder failed; it does not say the call was skipped.\n\nI read the code but did not run it. Impact is limited to multi-action turns where a reminder fails. The user also hears that the reminder failed, so the failure is not silent. What is silent is that the other actions were dropped.",
+   "adjusted_severity": "medium"
+  }
+ }
+]

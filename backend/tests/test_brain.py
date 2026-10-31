@@ -191,7 +191,7 @@ def test_clear_all_needs_confirmation(h):
 
 
 @pytest.mark.parametrize("text,expected", [
-    ("evet", "yes"), ("Evet, sil.", "yes"), ("tamam", "yes"), ("Zoro evet", "yes"), ("iptal et", "yes"),
+    ("evet", "yes"), ("Evet, sil.", "yes"), ("tamam", "yes"), ("Zoro evet", "yes"), ("iptal et", None), ("tamam iptal et", None),
     ("hayır", "no"), ("vazgeç", "no"), ("silme", "no"), ("iptal etme", "no"), ("tamam ama silme", "no"),
     ("Silivri", None), ("yarın ne var", None), ("bugün hava nasıl olacak acaba söyler misin", None),
     ("çok güzel", None), ("durum ne", None),
@@ -523,3 +523,36 @@ def test_client_note_reaches_the_model(h):
     developer = next(i["content"] for i in h.calls[0]["input"] if i.get("role") == "developer")
     assert "Telefonun son notu" in developer and "Okay Yılmaz" in developer
     assert r.get_json()["actions"][0]["name"] == "Okay Demir"
+
+
+# ------------------------------------------------- review r2 regressions
+
+def test_iptal_et_to_a_delete_question_does_not_delete(h):
+    task, _ = _delete_question(h)
+    h.script(resp(calls=[call("confirm_pending", answer="no")]), resp("Tamam, silmiyorum."))
+    out = h.ask("iptal et")
+    assert len(h.calls) == 3  # question + two model rounds for "iptal et"
+    assert h.store.get_task(task["id"]) is not None
+
+
+def test_legacy_refusal_is_told_even_when_out_of_time(h, monkeypatch):
+    import time as time_module
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time_module, "monotonic", lambda: clock["t"])
+
+    def slow(kwargs):
+        clock["t"] += 7.0
+        return resp(calls=[call("add_task", text="İlaç", due_at=at(1, 9), repeat="none"),
+                           call("add_task", text="Okay'ı ara", due_at=at(1, 10), repeat="none")])
+    h.script(slow)
+    out = h.ask("yarın 9'da ilacımı 10'da okayı aramamı hatırlat")
+    assert "ayrıca söyleyin" in out["reply"]
+
+
+def test_editing_daily_time_to_earlier_today_moves_to_tomorrow(h):
+    task = h.store.add_task("İlaç", at(1, 23, 59), DAILY_MS)
+    h.script(resp(calls=[call("edit_task", task_id="t:" + task["id"][:6], text=None, due_at=at(0, 0, 1))]), resp("Tamam."))
+    h.ask("ilacı gece 00:01'e çek")
+    assert h.tool_output(1)["ok"] is True
+    due = datetime.fromisoformat(h.store.get_task(task["id"])["due_at"])
+    assert due > datetime.now(TZ)

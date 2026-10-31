@@ -24,6 +24,11 @@ WMO_TR = {
 }
 
 
+def _r(value: Any) -> Any:
+    """Whole degrees/km/h: TTS reads 13.5 as "on üç nokta beş"."""
+    return round(value) if isinstance(value, (int, float)) else value
+
+
 def _get(url: str, params: dict[str, Any] | None = None) -> httpx.Response:
     response = httpx.get(url, params=params, timeout=TIMEOUT, headers={"User-Agent": "Zoro/2.0"})
     response.raise_for_status()
@@ -57,18 +62,18 @@ def weather(city: str, tz: str = "Europe/Istanbul") -> dict[str, Any]:
         days.append({
             "tarih": date,
             "durum": WMO_TR.get(int(daily["weather_code"][i]), "bilinmiyor"),
-            "en_yuksek": daily["temperature_2m_max"][i],
-            "en_dusuk": daily["temperature_2m_min"][i],
+            "en_yuksek": _r(daily["temperature_2m_max"][i]),
+            "en_dusuk": _r(daily["temperature_2m_min"][i]),
             "yagis_olasiligi": daily.get("precipitation_probability_max", [None] * 3)[i],
         })
     return {
         "ok": True,
         "yer": ", ".join(x for x in [place.get("name"), place.get("admin1"), place.get("country")] if x),
         "simdi": {
-            "sicaklik": current.get("temperature_2m"),
-            "hissedilen": current.get("apparent_temperature"),
+            "sicaklik": _r(current.get("temperature_2m")),
+            "hissedilen": _r(current.get("apparent_temperature")),
             "durum": WMO_TR.get(int(current.get("weather_code", -1)), "bilinmiyor"),
-            "ruzgar_kmh": current.get("wind_speed_10m"),
+            "ruzgar_kmh": _r(current.get("wind_speed_10m")),
         },
         "gunler": days,
         "kaynak": "Open-Meteo",

@@ -41,6 +41,8 @@ Eylemler
 - Zamanı geçmiş hatırlatmaları "bekleyen" diye sayma.
 - "Bunu unutma", "aklında tut", "hafızana kaydet" ve kişisel bilgiler → remember. Hafızadaki bir şey sorulursa bağlamdaki hafıza kayıtlarından cevap ver; yoksa bilmediğini söyle.
 - Zamanı daima bağlamdaki "Şu an" bilgisine göre hesapla ve araçlara saat dilimli ISO-8601 ver (örn. 2026-11-03T14:00:00+03:00). Saat hiç söylenmediyse sor. "Sabah" 09:00, "öğlen" 12:00, "öğleden sonra" 15:00, "akşam" 19:00 kabul et ve cevapta saati söyle.
+- Varsayılanlar (sorma, uygula ve cevapta tarih/saati söyle ki kullanıcı düzeltebilsin): gün adı ("cuma") bir sonraki o gündür; "sabah" denmedikçe "saat 1"–"saat 7" öğleden sonradır (13:00–19:00); "haftaya" 7 gün sonradır.
+- Takvim sorusunda ("toplantım ne zaman") en yakın uygun etkinliği söyle; birden fazla varsa ilkini söyle, diğerlerini kısaca an. Hangisi diye sorma.
 - Silme işlemlerinde sadece aracı çağır; onayı sistem kullanıcıya soracak.
 - Takvimde yalnızca kaynağı "Zoro" olan etkinlikler değiştirilebilir ya da silinebilir.
 - "Beni X'e götür", "X'e yol tarifi" → hemen navigate çağır; ulaşım şekli söylenmediyse driving kullan, sorma. "X'i ara" → call_contact. "X'e yaz", "mesaj at" → send_message (taslak açılır, gönder tuşuna kullanıcı basar; bunu söyle).
@@ -169,8 +171,8 @@ YES_PHRASES = {
     "evet", "evt", "evet evet", "evet sil", "evet silebilirsin", "evet sil gitsin", "sil", "sil gitsin",
     "silebilirsin", "tamam", "tamam sil", "evet tamam", "tamam evet", "olur", "olur sil", "evet olur",
     "onayla", "onaylıyorum", "onayliyorum", "evet onaylıyorum", "kesinlikle", "eminim", "evet eminim",
-    "aynen", "aynen sil", "evet lütfen", "evet lutfen", "iptal et", "evet iptal et", "tamam iptal et",
-    "evet yap", "yap", "he", "hı hı", "hıhı",
+    "aynen", "aynen sil", "evet lütfen", "evet lutfen", "evet yap", "yap", "he", "hı hı", "hıhı",
+    # "iptal et" is NOT here: to a "silinsin mi?" question it usually means "cancel".
 }
 QUESTION_RE = re.compile(r"\bm[ıiuü](s[ıiuü]n|y[ıiuü]m|d[ıiuü]r)?\b")
 
@@ -250,8 +252,8 @@ class Brain:
         if turn.cfg.reasoning_effort:
             params["reasoning"] = {"effort": turn.cfg.reasoning_effort}
         client = self.client
-        if turn.deadline is not None and turn.deadline - time.monotonic() < 15 and hasattr(client, "with_options"):
-            client = client.with_options(max_retries=0)  # no time for a retry
+        if turn.deadline is not None and hasattr(client, "with_options"):
+            client = client.with_options(max_retries=0)  # a retry would blow the turn budget
         try:
             return client.responses.create(**params)
         except Exception as error:

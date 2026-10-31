@@ -43,7 +43,9 @@ interface ZoroReminderPort {
 
 data class ZoroContactMatch(
     val name: String,
-    val number: String
+    val number: String,
+    val contactId: Long = 0L,
+    val mobile: Boolean = false
 )
 
 object ZoroActions {
@@ -234,8 +236,12 @@ object ZoroActions {
     private data class Built(
         val intent: Intent? = null,
         val problem: String? = null,
-        val label: String = ""
+        val label: String = "",
+        // Basarili acilista da okunacak kisa aciklama (orn. iki numara var).
+        val note: String? = null
     )
+
+    private val notificationIds = java.util.concurrent.atomic.AtomicInteger(4100)
 
     fun runIntentActions(
         activity: Activity,
@@ -261,6 +267,13 @@ object ZoroActions {
 
             val intent = built.intent ?: continue
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+            built.note?.let { failures.add(it) }
+
+            if (!inForeground && intent.action == Intent.ACTION_CALL && placeCallInBackground(activity, intent)) {
+                // Ekran kapaliyken de arama: Telecom bir ekran acmadan arar.
+                continue
+            }
 
             if (!inForeground) {
                 // Android arka plandaki uygulamanin ekran acmasini sessizce engeller.
@@ -288,6 +301,28 @@ object ZoroActions {
         return failures
     }
 
+    private fun placeCallInBackground(
+        context: Context,
+        intent: Intent
+    ): Boolean {
+
+        if (
+            context.checkSelfPermission(Manifest.permission.CALL_PHONE) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return false
+        }
+
+        return try {
+            context.getSystemService(android.telecom.TelecomManager::class.java)
+                .placeCall(intent.data, android.os.Bundle())
+            true
+        } catch (error: Exception) {
+            Log.e(TAG, "Arka planda arama yapilamadi", error)
+            false
+        }
+    }
+
     private fun notifyAction(
         context: Context,
         intent: Intent,
@@ -304,9 +339,11 @@ object ZoroActions {
 
         return try {
 
+            val id = notificationIds.incrementAndGet()
+
             val pendingIntent = android.app.PendingIntent.getActivity(
                 context,
-                label.hashCode(),
+                id,
                 intent,
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT or
                         android.app.PendingIntent.FLAG_IMMUTABLE
@@ -322,7 +359,7 @@ object ZoroActions {
                 .build()
 
             androidx.core.app.NotificationManagerCompat.from(context)
-                .notify(4100 + (label.hashCode() and 0xff), notification)
+                .notify(id, notification)
 
             true
 
@@ -403,7 +440,8 @@ object ZoroActions {
             return null
         }
 
-        val wanted = name.trim().lowercase(turkish)
+        // "Okay'ı" -> "okayı": kesme isareti atilir, ek eslestirmede tolere edilir.
+        val wanted = name.trim().lowercase(turkish).replace("'", "").replace("’", "")
 
         if (wanted.isBlank()) {
             return ContactSearch(emptyList(), 2)
@@ -416,7 +454,9 @@ object ZoroActions {
             ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
             arrayOf(
                 ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
-                ContactsContract.CommonDataKinds.Phone.NUMBER
+                ContactsContract.CommonDataKinds.Phone.NUMBER,
+                ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
+                ContactsContract.CommonDataKinds.Phone.TYPE
             ),
             null,
             null,
@@ -432,11 +472,17 @@ object ZoroActions {
 
                 val lower = display.lowercase(turkish)
                 val words = lower.split(" ").filter { it.isNotBlank() }
-                val match = ZoroContactMatch(display, number)
+                val match = ZoroContactMatch(
+                    name = display,
+                    number = number,
+                    contactId = cursor.getLong(2),
+                    mobile = cursor.getInt(3) ==
+                            ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE
+                )
 
                 when {
                     lower == wanted -> levels[0].add(match)
-                    wantedWords.all { it in words } -> levels[1].add(match)
+                    wantedWords.all { w -> words.any { sameWord(w, it) } } -> levels[1].add(match)
                     wantedWords.all { w -> words.any { it.startsWith(w) } } -> levels[2].add(match)
                 }
             }
@@ -452,11 +498,27 @@ object ZoroActions {
         )
     }
 
+    // Turkce hal ekleri: "Demiri", "Okay'a", "Ali'yi", "Ayşe'ye" -> yalin isim.
+    private val caseSuffixes = listOf(
+        "yi", "yı", "yu", "yü", "ya", "ye", "nin", "nın", "nun", "nün",
+        "i", "ı", "u", "ü", "a", "e"
+    )
+
+    fun sameWord(spoken: String, contactWord: String): Boolean {
+
+        if (spoken == contactWord) return true
+        if (contactWord.length < 3 || !spoken.startsWith(contactWord)) return false
+
+        return spoken.removePrefix(contactWord) in caseSuffixes
+    }
+
     // Sonuc: numara, sorun, numara rehberden kesin eslesmeyle mi geldi
     private data class Resolved(
         val number: String?,
         val problem: String?,
-        val trusted: Boolean
+        val trusted: Boolean,
+        // Ayni isimde birden fazla numara: kisi kartini ac, kullanici secsin.
+        val contactId: Long = 0L
     )
 
     private fun resolveNumber(
@@ -465,7 +527,9 @@ object ZoroActions {
         spokenNumber: String
     ): Resolved {
 
-        if (spokenNumber.count { it.isDigit() } >= 7) {
+        // 112, 155 gibi kisa numaralar da gecerli. Sunucu numarayi yalnizca
+        // kullanici soylediyse gonderir; yine de arama tusuna kullanici basar.
+        if (spokenNumber.count { it.isDigit() } >= 3) {
             // Sunucu yalnizca kullanicinin soyledigi numarayi gecirir;
             // yine de arama tusuna kullanici basar.
             return Resolved(spokenNumber, null, trusted = false)
@@ -491,8 +555,13 @@ object ZoroActions {
                             ". Hangisi olduğunu söyler misiniz?",
                     false
                 )
-            else ->
+            search.matches.size == 1 ->
                 Resolved(search.matches.first().number, null, trusted = search.level <= 1)
+            search.matches.count { it.mobile } == 1 && search.matches.map { it.contactId }.distinct().size == 1 ->
+                // Tek kisi, tek cep numarasi: onu ara.
+                Resolved(search.matches.first { it.mobile }.number, null, trusted = search.level <= 1)
+            else ->
+                Resolved(null, null, trusted = false, contactId = search.matches.first().contactId)
         }
     }
 
@@ -500,6 +569,21 @@ object ZoroActions {
 
         val name = action.optString("name")
         val resolved = resolveNumber(activity, name, action.optString("number"))
+
+        if (resolved.number == null && resolved.contactId > 0) {
+            return Built(
+                intent = Intent(
+                    Intent.ACTION_VIEW,
+                    android.net.Uri.withAppendedPath(
+                        ContactsContract.Contacts.CONTENT_URI,
+                        resolved.contactId.toString()
+                    )
+                ),
+                label = "$name kişi kartı",
+                note = "$name için birden fazla numara var, hangisini arayacağınızı ekrandan seçin."
+            )
+        }
+
         val number = resolved.number ?: return Built(problem = resolved.problem)
 
         val canCall = activity.checkSelfPermission(
@@ -538,6 +622,13 @@ object ZoroActions {
         // Alici numara olarak soylendiyse rehberde aranmaz.
         val spoken = if (recipient.count { it.isDigit() } >= 7) recipient else ""
         val resolved = resolveNumber(activity, recipient, spoken)
+
+        if (resolved.number == null && resolved.contactId > 0) {
+            return Built(
+                problem = "$recipient için birden fazla numara var. Numarayı söylerseniz taslağı açarım."
+            )
+        }
+
         val number = resolved.number ?: return Built(problem = resolved.problem)
 
         val intent = if (action.optString("app") == "sms") {

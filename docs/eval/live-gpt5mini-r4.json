@@ -1,0 +1,254 @@
+{
+  "summary": {
+    "model": "gpt-5-mini",
+    "effort": "low",
+    "calls": 19,
+    "input_tokens": 60810,
+    "output_tokens": 3304,
+    "estimated_usd": 0.0218,
+    "passed": 18,
+    "total": 18
+  },
+  "rows": [
+    {
+      "n": 1,
+      "status": "PASS",
+      "message": "Beni İstanbul'a götür",
+      "v2": true,
+      "tools": [
+        "navigate"
+      ],
+      "actions": [
+        "navigate"
+      ],
+      "reply": "Zafer Bey, İstanbul'a sürüş için yol tarifini başlatıyorum.",
+      "seconds": 3.9,
+      "problems": []
+    },
+    {
+      "n": 2,
+      "status": "PASS",
+      "message": "Toplantım ne zaman?",
+      "v2": true,
+      "tools": [],
+      "actions": [],
+      "reply": "Zafer Bey, toplantınız yarın 14:00 ile 15:00, Silivri'de (Silivri toplantısı). Ayrıca 2 Kasım Pazartesi 19:00 ile 21:00 bir aile yemeğiniz görünüyor.",
+      "seconds": 5.3,
+      "problems": []
+    },
+    {
+      "n": 3,
+      "status": "PASS",
+      "message": "Silivri'deki toplantıyı söyle",
+      "v2": true,
+      "tools": [],
+      "actions": [],
+      "reply": "Zafer Bey, Silivri'deki toplantınız yarın 14:00 ile 15:00 arası, yer Silivri.",
+      "seconds": 2.8,
+      "problems": []
+    },
+    {
+      "n": 4,
+      "status": "PASS",
+      "message": "Yarın sabah 9'da Okay'ı aramamı hatırlat",
+      "v2": true,
+      "tools": [
+        "add_task"
+      ],
+      "actions": [
+        "schedule_reminder"
+      ],
+      "reply": "Yarın 09:00'da Okay'ı aramanızı hatırlatacağım.",
+      "seconds": 3.9,
+      "problems": []
+    },
+    {
+      "n": 5,
+      "status": "PASS",
+      "message": "Okay'ı ara",
+      "v2": true,
+      "tools": [
+        "call_contact"
+      ],
+      "actions": [
+        "call"
+      ],
+      "reply": "Okay'ı arıyorum.",
+      "seconds": 2.3,
+      "problems": []
+    },
+    {
+      "n": 6,
+      "status": "PASS",
+      "message": "Okay'a yarın geliyorum diye WhatsApp'tan yaz",
+      "v2": true,
+      "tools": [
+        "send_message"
+      ],
+      "actions": [
+        "message"
+      ],
+      "reply": "Okay'a WhatsApp taslağını açtım; mesajı siz gönderirsiniz.",
+      "seconds": 3.0,
+      "problems": []
+    },
+    {
+      "n": 7,
+      "status": "PASS",
+      "message": "Bekle biraz",
+      "v2": true,
+      "tools": [],
+      "actions": [],
+      "reply": "Tamam Zafer Bey, bekliyorum.",
+      "seconds": 3.0,
+      "problems": []
+    },
+    {
+      "n": 8,
+      "status": "PASS",
+      "message": "Cuma günü saat 3'te Ahmet Bey'le görüşmemi takvime ekle",
+      "v2": true,
+      "tools": [
+        "calendar_add"
+      ],
+      "actions": [
+        "calendar_add"
+      ],
+      "reply": "6 Kasım Cuma 15:00'te Ahmet Bey ile görüşmenizi takvime ekledim.",
+      "seconds": 4.2,
+      "problems": []
+    },
+    {
+      "n": 9,
+      "status": "PASS",
+      "message": "Her gün akşam 8'de ilacımı hatırlat",
+      "v2": true,
+      "tools": [
+        "add_task"
+      ],
+      "actions": [
+        "schedule_reminder"
+      ],
+      "reply": "Her gün saat 20:00'de ilacınızı hatırlatacağım.",
+      "seconds": 3.0,
+      "problems": []
+    },
+    {
+      "n": 10,
+      "status": "PASS",
+      "message": "Bugün İstanbul'da hava nasıl?",
+      "v2": true,
+      "tools": [
+        "get_weather"
+      ],
+      "actions": [],
+      "reply": "İstanbul bugün kapalı, sıcaklık 13.5 derece; yağış ihtimali düşük.",
+      "seconds": 4.6,
+      "problems": []
+    },
+    {
+      "n": 11,
+      "status": "PASS",
+      "message": "Dolar kaç lira?",
+      "v2": true,
+      "tools": [
+        "get_exchange_rates"
+      ],
+      "actions": [],
+      "reply": "Bugünün TCMB kapanışına göre 1 Amerikan Doları 49 lira 86 kuruş.",
+      "seconds": 7.2,
+      "problems": []
+    },
+    {
+      "n": 12,
+      "status": "PASS",
+      "message": "Arabamın plakası 34 ZY 1234, bunu unutma",
+      "v2": true,
+      "tools": [
+        "remember"
+      ],
+      "actions": [],
+      "reply": "Arabanızın plakası kaydedildi: 34 ZY 1234.",
+      "seconds": 10.6,
+      "problems": []
+    },
+    {
+      "n": 13,
+      "status": "PASS",
+      "message": "Plakam neydi?",
+      "v2": true,
+      "tools": [],
+      "actions": [],
+      "reply": "Arabanızın plakası 34 ZY 1234.",
+      "seconds": 2.8,
+      "problems": []
+    },
+    {
+      "n": 14,
+      "status": "PASS",
+      "message": "Yarın 7'de beni uyandır",
+      "v2": true,
+      "tools": [
+        "set_alarm"
+      ],
+      "actions": [
+        "set_alarm"
+      ],
+      "reply": "07:00'de uyandıracağım.",
+      "seconds": 4.6,
+      "problems": []
+    },
+    {
+      "n": 15,
+      "status": "PASS",
+      "message": "YouTube'da Barış Manço aç",
+      "v2": true,
+      "tools": [
+        "open_app"
+      ],
+      "actions": [
+        "open_app"
+      ],
+      "reply": "YouTube'da Barış Manço'yu açıyorum.",
+      "seconds": 3.1,
+      "problems": []
+    },
+    {
+      "n": 16,
+      "status": "PASS",
+      "message": "Silivri toplantısını iptal et",
+      "v2": true,
+      "tools": [
+        "calendar_delete"
+      ],
+      "actions": [],
+      "reply": "Silivri toplantısı (yarın 14:00) etkinliği silinsin mi?",
+      "seconds": 2.6,
+      "problems": []
+    },
+    {
+      "n": 17,
+      "status": "PASS",
+      "message": "evet",
+      "v2": true,
+      "tools": [],
+      "actions": [
+        "calendar_delete"
+      ],
+      "reply": "Takvimden sildim: Silivri toplantısı.",
+      "seconds": 0.0,
+      "problems": []
+    },
+    {
+      "n": 18,
+      "status": "PASS",
+      "message": "Beni İstanbul'a götür",
+      "v2": false,
+      "tools": [],
+      "actions": [],
+      "reply": "Üzgünüm, şu an telefonunuz navigasyon yapamıyor; uygulamanın güncellenmesi gerekiyor. Uygulama güncellendiğinde sizi İstanbul'a sürüş için yönlendirebilirim.",
+      "seconds": 4.3,
+      "problems": []
+    }
+  ]
+}

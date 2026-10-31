@@ -456,7 +456,8 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                         }
 
                         override fun onStop(utteranceId: String?, interrupted: Boolean) {
-                            runOnUiThread { onSpeechFinished(utteranceId) }
+                            // Yeni bir cevap ya da kapanis sozu kesti: eski isi yapma.
+                            runOnUiThread { onSpeechFinished(utteranceId, completed = false) }
                         }
                     }
                 )
@@ -552,13 +553,21 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
         speak(text, id)
     }
 
-    private fun onSpeechFinished(utteranceId: String?) {
+    private fun onSpeechFinished(
+        utteranceId: String?,
+        completed: Boolean = true
+    ) {
 
         val entry = utteranceId?.let { afterSpeech.remove(it) }
 
         try {
-            // Yarida kesilen eski cevabin isi (orn. arama) yine yapilir.
-            entry?.first?.invoke()
+            // Yarida kesilen cevabin isi (orn. arama) yapilmaz: kullanici
+            // tam o sirada "hayir arama" demis olabilir.
+            if (completed) {
+                entry?.first?.invoke()
+            } else if (entry != null) {
+                Log.i("ZORO_ACTIONS", "Kesilen cevabin islemi atlandi: $utteranceId")
+            }
         } catch (error: Exception) {
             Log.e("ZORO_ACTIONS", "Cevap sonrasi islem hatasi", error)
         }
@@ -1589,9 +1598,13 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                                         )
                                     else emptyList()
 
+                                val hasPhoneActions =
+                                    serverActions?.any { !ZoroActions.isDataAction(it) } == true
+
                                 val spoken =
                                     if (failures.isNotEmpty())
-                                        failures.joinToString(" ")
+                                        failures.joinToString(" ") +
+                                                (if (hasPhoneActions) " Diğer isteğinizi yapıyorum." else "")
                                     else reply
 
                                 if (failures.isNotEmpty()) {
@@ -1620,7 +1633,9 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                                         listenForReply = expectReply && failures.isEmpty() && !typed
                                     ) {
 
-                                        if (serverActions != null && failures.isEmpty()) {
+                                        // Telefon aksiyonlari (arama, harita) takvim/alarm
+                                        // hatasindan bagimsizdir, yine yapilir.
+                                        if (serverActions != null) {
 
                                             val actionFailures =
                                                 ZoroActions.runIntentActions(

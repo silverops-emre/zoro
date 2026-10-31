@@ -103,6 +103,9 @@ class Turn:
 def legacy_slot_busy(turn: Turn) -> dict[str, Any] | None:
     """The v1 app executes one alarm action per response. Refuse a second one."""
     if not turn.client.can(CAP_REMINDERS) and turn.legacy is not None:
+        note = "Diğer hatırlatmayı aynı anda kuramadım, onu ayrıca söyleyin"
+        if note not in turn.notes:
+            turn.notes.append(note)
         return {"ok": False, "error": "Eski uygulama tek seferde yalnızca bir hatırlatmayı telefona kurabilir. "
                                        "Bunu kullanıcıya söyle; diğerini ayrıca istesin."}
     return None
@@ -298,6 +301,10 @@ def t_edit_task(turn: Turn, task_id: str, text: str | None, due_at: str | None) 
     if text and clean_text(text, 500):
         fields["text"] = clean_text(text, 500)
     if due_at:
+        first = parse_iso(due_at, turn.tz)
+        if first is not None and first < turn.now and task.get("repeat_interval") == DAILY_MS:  # type: ignore[union-attr]
+            # "ilacı 8'e çek" at 10:00 for a daily task means from tomorrow on.
+            due_at = iso(next_occurrence_daily(first, turn.now))
         due, error = parse_future(turn, due_at, "Yeni zaman")
         if error:
             return fail(error)
@@ -381,6 +388,7 @@ def t_confirm_pending(turn: Turn, answer: str) -> dict[str, Any]:
         return fail("Onay bekleyen işlem yok.")
     if answer == "yes":
         reply = execute_pending(turn, turn.pending)
+        turn.notes.append(reply.rstrip("."))
         return ok(sonuc=reply)
     turn.store.close_pending(turn.pending["id"], "cancelled")
     turn.notes.append("Bekleyen işlem iptal edildi")
@@ -695,12 +703,12 @@ _register(CAP_NAVIGATE, _fn("navigate", "Google Haritalar'da yol tarifini başla
     "mode": {"type": "string", "enum": ["driving", "walking", "transit"]},
 }), t_navigate)
 _register(CAP_CALL, _fn("call_contact", "Rehberdeki birini ya da bir numarayı arar.", {
-    "name": {**S, "description": "Rehberdeki isim, örn. 'Okay'."},
+    "name": {**S, "description": "Rehberdeki ismin yalın hali, ekleri at: 'Okay'ı ara' → 'Okay', 'Ahmet Demir'i' → 'Ahmet Demir'."},
     "phone_number": {**S_NULL, "description": "Kullanıcı numara söylediyse."},
 }), t_call_contact)
 _register(CAP_MESSAGE, _fn("send_message", "SMS ya da WhatsApp mesaj taslağı açar; kullanıcı kendisi gönderir.", {
     "app": {"type": "string", "enum": ["whatsapp", "sms"]},
-    "recipient": {**S, "description": "Rehberdeki isim ya da numara."},
+    "recipient": {**S, "description": "Rehberdeki ismin yalın hali (ekleri at: 'Okay'a' → 'Okay') ya da yalnızca rakamlarla numara."},
     "text": S,
 }), t_send_message)
 _register(CAP_OPEN_APP, _fn("open_app", "Telefonda bir uygulamayı açar; query varsa içinde arar (YouTube'da video, Spotify'da şarkı, tarayıcıda arama).", {
