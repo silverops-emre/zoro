@@ -26,7 +26,7 @@ def defaults(cfg: Config) -> dict[str, Any]:
         "voice": cfg.tts_voice if cfg.tts_voice in VOICES else "marin",
         "monthly_budget_usd": cfg.monthly_budget_usd,
         "briefing_enabled": True,
-        "briefing_time": "08:00",
+        "briefing_time": "10:00",  # the v1 app briefed at 10:00
     }
 
 

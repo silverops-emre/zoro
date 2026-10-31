@@ -135,7 +135,7 @@ def test_zero_budget_means_no_limit(h):
 def test_settings_defaults_and_validation(h):
     data = h.client.get("/settings").get_json()
     assert data["settings"] == {"web_search": False, "natural_voice": False, "voice": "marin",
-                                "monthly_budget_usd": 10.0, "briefing_enabled": True, "briefing_time": "08:00"}
+                                "monthly_budget_usd": 10.0, "briefing_enabled": True, "briefing_time": "10:00"}
     assert "cedar" in data["voices"]
     bad = h.client.put("/settings", json={"voice": "darth", "monthly_budget_usd": -3, "briefing_time": "25:00",
                                           "web_search": "yes"})
@@ -336,7 +336,7 @@ def test_read_only_phone_event_is_refused(h):
     h.script(metered(calls=[call("calendar_delete", event_id="e1")]), metered("Bu etkinliği silemem."))
     out = ask_v2(h, "kurul toplantısını sil", {"calendar": [phone_event(False, start)]})
     assert out["pending"] is None and out["actions"] == []
-    assert "salt okunur" in h.tool_output(1)["error"]
+    assert "Zoro silemez" in h.tool_output(1)["error"]
 
 
 def test_only_a_literal_true_marks_an_event_writable(h):
@@ -344,7 +344,7 @@ def test_only_a_literal_true_marks_an_event_writable(h):
     event = phone_event("true", start)
     h.script(metered("Tamam."))
     ask_v2(h, "takvimde ne var", {"calendar": [event]})
-    assert "salt okunur" in h.calls[0]["input"][-2]["content"]
+    assert "Zoro değiştiremez" in h.calls[0]["input"][-2]["content"]
 
 
 # --------------------------------------------------------------- briefing

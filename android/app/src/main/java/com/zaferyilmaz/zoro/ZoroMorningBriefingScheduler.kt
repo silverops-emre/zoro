@@ -15,8 +15,6 @@ object ZoroMorningBriefingScheduler {
 
     private const val REQUEST_CODE = 101000
 
-    private const val BRIEFING_HOUR = 10
-    private const val BRIEFING_MINUTE = 0
 
     // ==========================================
     // HER GUN SAAT 10.00 ALARMINI PLANLA
@@ -33,6 +31,10 @@ object ZoroMorningBriefingScheduler {
                     AlarmManager::class.java
                 )
 
+            // ZORO 2.1: saat ve acik/kapali Ayarlar ekranindan gelir (varsayilan 10:00).
+            val (briefingHour, briefingMinute) =
+                ZoroPrefs.briefingTime(context)
+
             val zone = TimeZone.getTimeZone(
                 "Europe/Istanbul"
             )
@@ -43,12 +45,12 @@ object ZoroMorningBriefingScheduler {
 
                 set(
                     Calendar.HOUR_OF_DAY,
-                    BRIEFING_HOUR
+                    briefingHour
                 )
 
                 set(
                     Calendar.MINUTE,
-                    BRIEFING_MINUTE
+                    briefingMinute
                 )
 
                 set(
@@ -87,6 +89,12 @@ object ZoroMorningBriefingScheduler {
                     PendingIntent.FLAG_UPDATE_CURRENT or
                             PendingIntent.FLAG_IMMUTABLE
                 )
+
+            if (!ZoroPrefs.briefingEnabled(context)) {
+                alarmManager.cancel(pendingIntent)
+                Log.i(TAG, "Sabah ozeti kapali, alarm kaldirildi")
+                return true
+            }
 
             val exactAllowed =
                 Build.VERSION.SDK_INT <

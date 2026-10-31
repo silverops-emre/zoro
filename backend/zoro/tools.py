@@ -457,7 +457,7 @@ def t_calendar_update(turn: Turn, event_id: str, title: str | None, start: str |
     if ev is None:
         return fail("Etkinlik bulunamadı; bağlamdaki [e...] kimliklerinden birini kullan.")
     if not ev.editable:
-        return fail("Bu etkinlik telefon takviminde salt okunur (tekrarlayan etkinlik ya da Google Takvim yazma ayarı kapalı), Zoro değiştiremez.")
+        return fail("Bu etkinliği Zoro değiştiremez (tekrarlayan etkinlik ya da ayarlarda Google Takvim değiştirme kapalı). Takvim uygulamasından değiştirilebilir.")
     new_start, new_end = ev.start, ev.end
     if start:
         new_start, error = parse_future(turn, start, "Yeni başlangıç")
@@ -493,7 +493,7 @@ def t_calendar_delete(turn: Turn, event_id: str) -> dict[str, Any]:
     if ev is None:
         return fail("Etkinlik bulunamadı; bağlamdaki [e...] kimliklerinden birini kullan.")
     if not ev.editable:
-        return fail("Bu etkinlik telefon takviminde salt okunur (tekrarlayan etkinlik ya da Google Takvim yazma ayarı kapalı), Zoro silemez.")
+        return fail("Bu etkinliği Zoro silemez (tekrarlayan etkinlik ya da ayarlarda Google Takvim değiştirme kapalı). Takvim uygulamasından silinebilir.")
     return request_confirmation(
         turn, "calendar_delete", {"event_id": ev.id, "title": ev.title},
         f"{describe_event(turn, ev)} etkinliği",

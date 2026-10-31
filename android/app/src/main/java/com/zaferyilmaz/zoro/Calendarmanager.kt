@@ -30,7 +30,10 @@ data class ZoroCalendarEvent(
     val endMillis: Long,
     val location: String,
     val source: String,
-    val allDay: Boolean = false
+    val allDay: Boolean = false,
+    // Telefon takvimi etkinligi Zoro tarafindan degistirilebilir mi
+    // (ayar acik, yazma izni var, tekrarlamayan, tum gun degil).
+    val writable: Boolean = false
 )
 
 // ==========================================
@@ -602,8 +605,14 @@ class CalendarManager(
                 CalendarContract.Instances.END,
                 CalendarContract.Instances.EVENT_LOCATION,
                 CalendarContract.Instances.ALL_DAY,
-                CalendarContract.Instances.CALENDAR_DISPLAY_NAME
+                CalendarContract.Instances.CALENDAR_DISPLAY_NAME,
+                CalendarContract.Instances.CALENDAR_ACCESS_LEVEL,
+                CalendarContract.Instances.RRULE,
+                CalendarContract.Instances.ORIGINAL_ID
             )
+
+            val mayWrite =
+                ZoroPrefs.calendarWrite(context) && canWriteAndroidCalendar()
 
             context.contentResolver.query(
                 builder.build(),
@@ -686,6 +695,12 @@ class CalendarManager(
                     val isAllDay =
                         cursor.getInt(allDayIndex) != 0
 
+                    val writable = mayWrite && !isAllDay &&
+                            cursor.getInt(projection.size - 3) >=
+                            CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR &&
+                            cursor.getString(projection.size - 2).isNullOrBlank() &&
+                            cursor.isNull(projection.size - 1)
+
                     result.add(
                         ZoroCalendarEvent(
                             id = "android_${eventId}_$begin",
@@ -696,7 +711,8 @@ class CalendarManager(
                             location = location,
                             source =
                                 "$SOURCE_ANDROID:$calendarName",
-                            allDay = isAllDay
+                            allDay = isAllDay,
+                            writable = writable
                         )
                     )
                 }
@@ -720,6 +736,100 @@ class CalendarManager(
         }
 
         return result
+    }
+
+    // ==========================================
+    // ZORO 2.1: TELEFON TAKVIMINDE DEGISIKLIK
+    // ==========================================
+    // Kimlik "android_<eventId>_<baslangic>". Tekrarlayan etkinlik hic
+    // degistirilmez: tek bir gunu silmek butun seriyi silebilir.
+
+    private fun androidEventId(key: String): Long? =
+        key.removePrefix("android_").substringBefore("_").toLongOrNull()
+            ?.takeIf { key.startsWith("android_") }
+
+    private fun androidEventChangeable(eventId: Long): Boolean {
+
+        if (!ZoroPrefs.calendarWrite(context) || !canWriteAndroidCalendar()) {
+            return false
+        }
+
+        return try {
+            context.contentResolver.query(
+                ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
+                arrayOf(
+                    CalendarContract.Events.RRULE,
+                    CalendarContract.Events.ORIGINAL_ID,
+                    CalendarContract.Events.ALL_DAY,
+                    CalendarContract.Events.CALENDAR_ACCESS_LEVEL
+                ),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                cursor.moveToFirst() &&
+                        cursor.getString(0).isNullOrBlank() &&
+                        cursor.isNull(1) &&
+                        cursor.getInt(2) == 0 &&
+                        cursor.getInt(3) >= CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR
+            } == true
+        } catch (error: Exception) {
+            Log.e(TAG, "Telefon takvimi etkinligi okunamadi", error)
+            false
+        }
+    }
+
+    fun updateAndroidEvent(
+        key: String,
+        title: String,
+        startMillis: Long,
+        endMillis: Long,
+        location: String
+    ): Boolean {
+
+        val eventId = androidEventId(key) ?: return false
+
+        if (endMillis <= startMillis || !androidEventChangeable(eventId)) {
+            return false
+        }
+
+        return try {
+            val values = android.content.ContentValues().apply {
+                put(CalendarContract.Events.TITLE, title)
+                put(CalendarContract.Events.DTSTART, startMillis)
+                put(CalendarContract.Events.DTEND, endMillis)
+                put(CalendarContract.Events.EVENT_LOCATION, location)
+            }
+            context.contentResolver.update(
+                ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
+                values,
+                null,
+                null
+            ) == 1
+        } catch (error: Exception) {
+            Log.e(TAG, "Telefon takvimi etkinligi guncellenemedi", error)
+            false
+        }
+    }
+
+    fun deleteAndroidEvent(key: String): Boolean {
+
+        val eventId = androidEventId(key) ?: return false
+
+        if (!androidEventChangeable(eventId)) {
+            return false
+        }
+
+        return try {
+            context.contentResolver.delete(
+                ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
+                null,
+                null
+            ) == 1
+        } catch (error: Exception) {
+            Log.e(TAG, "Telefon takvimi etkinligi silinemedi", error)
+            false
+        }
     }
 
     // ==========================================

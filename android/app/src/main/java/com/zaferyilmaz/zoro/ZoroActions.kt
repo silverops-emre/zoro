@@ -105,6 +105,7 @@ object ZoroActions {
                     .put("location", event.location)
                     .put("source", event.source)
                     .put("all_day", event.allDay)
+                    .put("writable", event.writable)
             )
         }
 
@@ -182,7 +183,15 @@ object ZoroActions {
                         val current = calendar.getLocalEvents()
                             .firstOrNull { it.id == id }
 
-                        val updated = current != null &&
+                        val updated = if (id.startsWith("android_"))
+                            calendar.updateAndroidEvent(
+                                key = id,
+                                title = action.optString("title"),
+                                startMillis = action.optLong("start_ms"),
+                                endMillis = action.optLong("end_ms"),
+                                location = action.optString("location")
+                            )
+                        else current != null &&
                                 calendar.updateLocalEvent(
                                     current.copy(
                                         title = action.optString("title", current.title)
@@ -205,7 +214,13 @@ object ZoroActions {
 
                         val id = action.optString("event_id")
 
-                        if (calendar.deleteLocalEvent(id)) {
+                        if (id.startsWith("android_")) {
+                            if (!calendar.deleteAndroidEvent(id)) {
+                                failures.add(
+                                    "${action.optString("title")} telefon takviminden silinemedi."
+                                )
+                            }
+                        } else if (calendar.deleteLocalEvent(id)) {
                             ZoroCalendarAlarmScheduler.removeReminderSettings(
                                 context,
                                 id
@@ -244,7 +259,7 @@ object ZoroActions {
     private val notificationIds = java.util.concurrent.atomic.AtomicInteger(4100)
 
     fun runIntentActions(
-        activity: Activity,
+        context: Context,
         actions: List<JSONObject>,
         inForeground: Boolean
     ): List<String> {
@@ -254,7 +269,7 @@ object ZoroActions {
         for (action in actions.filterNot { isDataAction(it) }) {
 
             val built = try {
-                build(activity, action)
+                build(context, action)
             } catch (error: Exception) {
                 Log.e(TAG, "Aksiyon hazirlanamadi: $action", error)
                 Built(problem = "İşlem başlatılamadı.")
@@ -270,7 +285,7 @@ object ZoroActions {
 
             built.note?.let { failures.add(it) }
 
-            if (!inForeground && intent.action == Intent.ACTION_CALL && placeCallInBackground(activity, intent)) {
+            if (!inForeground && intent.action == Intent.ACTION_CALL && placeCallInBackground(context, intent)) {
                 // Ekran kapaliyken de arama: Telecom bir ekran acmadan arar.
                 continue
             }
@@ -279,7 +294,7 @@ object ZoroActions {
                 // Android arka plandaki uygulamanin ekran acmasini sessizce engeller.
                 // Bildirime dokununca acilir.
                 failures.add(
-                    if (notifyAction(activity, intent, built.label))
+                    if (notifyAction(context, intent, built.label))
                         "Ekran kapalıyken açamıyorum. Bildirime dokunarak açabilirsiniz."
                     else
                         "Ekran kapalıyken açamıyorum. Zoro'yu açıp tekrar söyleyin."
@@ -288,7 +303,7 @@ object ZoroActions {
             }
 
             try {
-                activity.startActivity(intent)
+                context.startActivity(intent)
             } catch (error: ActivityNotFoundException) {
                 Log.e(TAG, "Uygulama bulunamadi: $action", error)
                 failures.add("Bu işi yapacak uygulama telefonda bulunamadı.")
@@ -369,20 +384,20 @@ object ZoroActions {
         }
     }
 
-    private fun build(activity: Activity, action: JSONObject): Built {
+    private fun build(context: Context, action: JSONObject): Built {
 
         return when (action.optString("type")) {
-            "navigate" -> navigate(activity, action)
-            "call" -> call(activity, action)
-            "message" -> message(activity, action)
-            "open_app" -> openApp(activity, action)
+            "navigate" -> navigate(context, action)
+            "call" -> call(context, action)
+            "message" -> message(context, action)
+            "open_app" -> openApp(context, action)
             "set_alarm" -> setAlarm(action)
             "set_timer" -> setTimer(action)
             else -> Built()
         }
     }
 
-    private fun navigate(activity: Activity, action: JSONObject): Built {
+    private fun navigate(context: Context, action: JSONObject): Built {
 
         val destination = action.optString("destination").trim()
 
@@ -409,7 +424,7 @@ object ZoroActions {
             Uri.parse("https://www.google.com/maps/dir/?api=1&destination=$encoded")
         )
 
-        val mapsInstalled = maps.resolveActivity(activity.packageManager) != null
+        val mapsInstalled = maps.resolveActivity(context.packageManager) != null
 
         return Built(
             intent = if (mapsInstalled) maps else web,
@@ -522,7 +537,7 @@ object ZoroActions {
     )
 
     private fun resolveNumber(
-        activity: Activity,
+        context: Context,
         name: String,
         spokenNumber: String
     ): Resolved {
@@ -535,7 +550,7 @@ object ZoroActions {
             return Resolved(spokenNumber, null, trusted = false)
         }
 
-        val search = findContacts(activity, name)
+        val search = findContacts(context, name)
             ?: return Resolved(
                 null,
                 "Rehber izni olmadığı için $name kişisini bulamadım. Zoro'ya rehber izni verin.",
@@ -565,10 +580,24 @@ object ZoroActions {
         }
     }
 
-    private fun call(activity: Activity, action: JSONObject): Built {
+    private fun call(context: Context, action: JSONObject): Built {
 
         val name = action.optString("name")
-        val resolved = resolveNumber(activity, name, action.optString("number"))
+
+        // "Onu geri ara": numara telefonun kendi arama kaydindan geldi.
+        val logNumber = action.optString("number")
+        if (action.optBoolean("from_call_log") && ZoroCallLog.isRecentNumber(context, logNumber)) {
+            val canCall = context.checkSelfPermission(Manifest.permission.CALL_PHONE) ==
+                    PackageManager.PERMISSION_GRANTED
+            return Built(
+                intent = Intent(
+                    if (canCall) Intent.ACTION_CALL else Intent.ACTION_DIAL,
+                    Uri.parse("tel:" + Uri.encode(logNumber))
+                ),
+                label = "${name.ifBlank { logNumber }} aranıyor"
+            )
+        }
+        val resolved = resolveNumber(context, name, action.optString("number"))
 
         if (resolved.number == null && resolved.contactId > 0) {
             return Built(
@@ -586,7 +615,7 @@ object ZoroActions {
 
         val number = resolved.number ?: return Built(problem = resolved.problem)
 
-        val canCall = activity.checkSelfPermission(
+        val canCall = context.checkSelfPermission(
             Manifest.permission.CALL_PHONE
         ) == PackageManager.PERMISSION_GRANTED
 
@@ -614,14 +643,14 @@ object ZoroActions {
         return digits
     }
 
-    private fun message(activity: Activity, action: JSONObject): Built {
+    private fun message(context: Context, action: JSONObject): Built {
 
         val recipient = action.optString("recipient")
         val text = action.optString("text")
 
         // Alici numara olarak soylendiyse rehberde aranmaz.
         val spoken = if (recipient.count { it.isDigit() } >= 7) recipient else ""
-        val resolved = resolveNumber(activity, recipient, spoken)
+        val resolved = resolveNumber(context, recipient, spoken)
 
         if (resolved.number == null && resolved.contactId > 0) {
             return Built(
@@ -646,10 +675,10 @@ object ZoroActions {
         return Built(intent = intent, label = "$recipient için mesaj taslağı")
     }
 
-    private fun launchPackage(activity: Activity, packageName: String): Intent? =
-        activity.packageManager.getLaunchIntentForPackage(packageName)
+    private fun launchPackage(context: Context, packageName: String): Intent? =
+        context.packageManager.getLaunchIntentForPackage(packageName)
 
-    private fun openApp(activity: Activity, action: JSONObject): Built {
+    private fun openApp(context: Context, action: JSONObject): Built {
 
         val query = action.optString("query").trim()
         val encoded = Uri.encode(query)
@@ -661,18 +690,18 @@ object ZoroActions {
                 if (query.isNotBlank())
                     Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=$encoded"))
                 else
-                    launchPackage(activity, "com.google.android.youtube")
+                    launchPackage(context, "com.google.android.youtube")
                         ?: Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com"))
 
             "spotify" ->
                 if (query.isNotBlank())
                     Intent(Intent.ACTION_VIEW, Uri.parse("spotify:search:$encoded"))
                 else
-                    launchPackage(activity, "com.spotify.music")
+                    launchPackage(context, "com.spotify.music")
 
             "whatsapp" ->
-                launchPackage(activity, "com.whatsapp")
-                    ?: launchPackage(activity, "com.whatsapp.w4b")
+                launchPackage(context, "com.whatsapp")
+                    ?: launchPackage(context, "com.whatsapp.w4b")
 
             "maps" ->
                 Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=$encoded"))

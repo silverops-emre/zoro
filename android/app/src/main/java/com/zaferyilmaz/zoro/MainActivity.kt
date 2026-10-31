@@ -112,7 +112,14 @@ enum class ZoroTaskOperation(
 
 class MainActivity : ComponentActivity(), ZoroReminderPort {
 
-    private lateinit var textToSpeech: TextToSpeech
+    companion object {
+        // ZORO 2.1: ekran yasiyorsa sesli komut ekrana gider, yoksa servis isler.
+        @Volatile
+        var isAlive = false
+    }
+
+    // ZORO 2.1: dogal ses ya da telefonun en iyi Turkce sesi.
+    private var speaker: ZoroSpeaker? = null
 
     // ZORO_V2_SERVER_CONFIG
     // Sunucu adresi ve kimlik bilgisi zoro.properties dosyasindan gelir.
@@ -138,8 +145,14 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
     private var followUpListens = 0
 
     // Telefonda olan ve sunucunun bilmedigi son durum (orn. rehberde iki "Okay").
-    // Bir sonraki istekle sunucuya gider.
-    private var clientNote: String? = null
+    // Bir sonraki istekle sunucuya gider. Ses servisiyle ortak.
+    private var clientNote: String?
+        get() = ZoroServer.clientNote
+        set(value) {
+            ZoroServer.clientNote = value
+        }
+
+    private var settingsScreenOpen by mutableStateOf(false)
 
     private val tag = "ZORO_REMINDER"
 
@@ -265,6 +278,7 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
     ) {
 
         super.onCreate(savedInstanceState)
+        isAlive = true
         // ZORO_MORNING_BRIEFING_START
 // Her sabah saat 10.00 icin brifing alarmi kur.
         ZoroMorningBriefingScheduler.scheduleNext(applicationContext)
@@ -296,13 +310,33 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
         registerVoiceReceiver()
         syncLocalMemoriesOnce()
 
+        // ZORO 2.1: sunucu ozellikleri ve ayarlari (dogal ses, sabah ozeti saati).
+        Thread({ ZoroServer.syncSettings(applicationContext, httpClient) }, "zoro-settings").start()
+
         setContent {
 
             BackHandler(enabled = calendarScreenOpen) {
                 calendarScreenOpen = false
             }
 
-            if (calendarScreenOpen) {
+            BackHandler(enabled = settingsScreenOpen) {
+                settingsScreenOpen = false
+            }
+
+            if (settingsScreenOpen) {
+
+                ZoroSettingsScreen(
+                    http = httpClient,
+                    onBack = { settingsScreenOpen = false },
+                    previewVoice = { voice, onError ->
+                        speaker?.preview(voice, "ZORO_PREVIEW_" + System.nanoTime(), onError)
+                    },
+                    requestPermission = { permissions ->
+                        requestPermissions(permissions.toTypedArray(), 2002)
+                    }
+                )
+
+            } else if (calendarScreenOpen) {
 
                 ZoroCalendarScreen(
                     onBack = {
@@ -373,6 +407,9 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                 lastReply = lastReply,
                 askText = { text ->
                     askZoro(text, typed = true)
+                },
+                openSettings = {
+                    settingsScreenOpen = true
                 }
             )
             }
@@ -401,7 +438,11 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
         // Rehber ve arama izni "Okay'i ara", "Okay'a yaz" icin.
         val wanted = mutableListOf(
             Manifest.permission.READ_CONTACTS,
-            Manifest.permission.CALL_PHONE
+            Manifest.permission.CALL_PHONE,
+            // ZORO 2.1: Google Takvim'i gorme/degistirme ve "beni kim aradi".
+            Manifest.permission.READ_CALENDAR,
+            Manifest.permission.WRITE_CALENDAR,
+            Manifest.permission.READ_CALL_LOG
         )
 
         if (Build.VERSION.SDK_INT >= 37) {
@@ -427,41 +468,8 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
 
     private fun initializeTextToSpeech() {
 
-        textToSpeech = TextToSpeech(this) { status ->
-
-            if (
-                status == TextToSpeech.SUCCESS &&
-                ::textToSpeech.isInitialized
-            ) {
-
-                textToSpeech.language =
-                    Locale.forLanguageTag("tr-TR")
-
-                textToSpeech.setPitch(0.85f)
-                textToSpeech.setSpeechRate(0.95f)
-
-                textToSpeech.setOnUtteranceProgressListener(
-                    object : UtteranceProgressListener() {
-
-                        override fun onStart(utteranceId: String?) {
-                        }
-
-                        override fun onDone(utteranceId: String?) {
-                            runOnUiThread { onSpeechFinished(utteranceId) }
-                        }
-
-                        @Deprecated("Deprecated in Java")
-                        override fun onError(utteranceId: String?) {
-                            runOnUiThread { onSpeechFinished(utteranceId) }
-                        }
-
-                        override fun onStop(utteranceId: String?, interrupted: Boolean) {
-                            // Yeni bir cevap ya da kapanis sozu kesti: eski isi yapma.
-                            runOnUiThread { onSpeechFinished(utteranceId, completed = false) }
-                        }
-                    }
-                )
-            }
+        speaker = ZoroSpeaker(this) { id, completed ->
+            onSpeechFinished(id, completed)
         }
     }
 
@@ -510,7 +518,9 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
 
         val cleanText = cleanTextForSpeech(text)
 
-        if (cleanText.isBlank() || !::textToSpeech.isInitialized) {
+        val engine = speaker
+
+        if (cleanText.isBlank() || engine == null) {
             onSpeechFinished(utteranceId)
             return
         }
@@ -524,16 +534,7 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
             ZoroVoiceService.pauseForSpeech()
         }
 
-        val result = textToSpeech.speak(
-            cleanText,
-            TextToSpeech.QUEUE_FLUSH,
-            null,
-            utteranceId
-        )
-
-        if (result != TextToSpeech.SUCCESS) {
-            onSpeechFinished(utteranceId)
-        }
+        engine.speak(cleanText, utteranceId)
     }
 
     // ==========================================
@@ -1428,7 +1429,8 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
         val body = ZoroServer.askBody(
             message = message,
             calendar = calendarContext,
-            clientNote = note
+            clientNote = note,
+            recentCalls = ZoroCallLog.recentCalls(applicationContext)
         )
             .toString()
             .toRequestBody(
@@ -2034,394 +2036,47 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
     // ==========================================
     // ZORO 2.0: SUNUCUDAN GELEN HATIRLATMALAR
     // ==========================================
+    // Alarm kodu ZoroReminders'a tasindi (ses servisi de kullaniyor).
 
     override fun scheduleReminderFromServer(
         taskText: String,
         dueAt: String,
         alarmId: String,
         repeatInterval: Long
-    ): Boolean {
-
-        if (taskText.isBlank() || !isValidDueAt(dueAt)) {
-            return false
-        }
-
-        val id = alarmId.ifBlank { dueAt }
-
-        // Ayni kimlikle kurulan alarm eskisinin yerine gecer (FLAG_UPDATE_CURRENT),
-        // once iptal edilmez: yeni alarm kurulamazsa eskisi kaybolmasin.
-        scheduleReminder(
-            taskText = taskText,
-            dueAt = dueAt,
-            alarmId = id,
-            repeatInterval = repeatInterval
-        )
-
-        // scheduleReminder yalnizca alarm kurulunca kaydeder.
-        return ReminderStore.getAllReminders(applicationContext).any {
-            it.alarmId == id && it.dueAt == dueAt
-        }
-    }
+    ): Boolean = ZoroReminders.scheduleFromServer(
+        applicationContext, taskText, dueAt, alarmId, repeatInterval
+    )
 
     override fun cancelReminderFromServer(
         alarmId: String,
         dueAt: String,
         taskText: String
-    ) {
-
-        if (alarmId.isNotBlank() && alarmId != "null") {
-            cancelReminderByAlarmId(alarmId)
-        } else if (isValidDueAt(dueAt)) {
-            cancelReminderByDueAt(dueAt)
-        } else if (taskText.isNotBlank()) {
-            cancelReminderByTaskText(taskText)
-        }
-    }
-
-    // ==========================================
-    // GUVENLI ALARM KURMA
-    // ==========================================
-
-    private fun setSafeAlarm(
-        manager: AlarmManager,
-        whenMillis: Long,
-        pendingIntent: PendingIntent
-    ): Boolean {
-
-        return try {
-
-            val allowed =
-                Build.VERSION.SDK_INT <
-                        Build.VERSION_CODES.S ||
-                        manager.canScheduleExactAlarms()
-
-            if (allowed) {
-
-                manager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    whenMillis,
-                    pendingIntent
-                )
-
-            } else {
-
-                manager.setAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    whenMillis,
-                    pendingIntent
-                )
-            }
-
-            true
-
-        } catch (error: SecurityException) {
-
-            Log.w(
-                tag,
-                "Kesin alarm izni yok, alternatif deneniyor.",
-                error
-            )
-
-            try {
-
-                manager.setAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    whenMillis,
-                    pendingIntent
-                )
-
-                true
-
-            } catch (fallbackError: Exception) {
-
-                Log.e(
-                    tag,
-                    "Alarm kurulamadı",
-                    fallbackError
-                )
-
-                false
-            }
-
-        } catch (error: Exception) {
-
-            Log.e(
-                tag,
-                "Alarm kurma hatası",
-                error
-            )
-
-            false
-        }
-    }
-
-    // ==========================================
-    // HATIRLATMA OLUSTUR
-    // ==========================================
+    ) = ZoroReminders.cancelFromServer(applicationContext, alarmId, dueAt, taskText)
 
     private fun scheduleReminder(
         taskText: String,
         dueAt: String,
         alarmId: String,
         repeatInterval: Long
-    ) {
+    ) = ZoroReminders.schedule(applicationContext, taskText, dueAt, alarmId, repeatInterval)
 
-        try {
+    private fun cancelReminderByDueAt(dueAt: String) =
+        ZoroReminders.cancelByDueAt(applicationContext, dueAt)
 
-            val trigger =
-                parseDueAtMillis(dueAt)
-                    ?: return
+    private fun cancelReminderByTaskText(taskText: String) =
+        ZoroReminders.cancelByTaskText(applicationContext, taskText)
 
-            if (
-                trigger <= System.currentTimeMillis()
-            ) {
+    private fun cancelReminderByAlarmId(alarmId: String) =
+        ZoroReminders.cancelByAlarmId(applicationContext, alarmId)
 
-                Log.w(
-                    tag,
-                    "Geçmiş tarihe alarm kurulmadı: $dueAt"
-                )
+    private fun cancelAllStoredReminders() =
+        ZoroReminders.cancelAll(applicationContext)
 
-                return
-            }
+    private fun parseDueAtMillis(dueAt: String): Long? =
+        ZoroReminders.parseDueAtMillis(dueAt)
 
-            val intent = Intent(
-                this,
-                ReminderReceiver::class.java
-            ).apply {
-
-                putExtra(
-                    "task_text",
-                    taskText
-                )
-
-                putExtra(
-                    "alarm_id",
-                    alarmId
-                )
-
-                putExtra(
-                    "repeat_interval",
-                    repeatInterval
-                )
-            }
-
-            val pendingIntent =
-                PendingIntent.getBroadcast(
-                    this,
-                    alarmId.hashCode(),
-                    intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or
-                            PendingIntent.FLAG_IMMUTABLE
-                )
-
-            val manager =
-                getSystemService(
-                    AlarmManager::class.java
-                )
-
-            if (
-                !setSafeAlarm(
-                    manager,
-                    trigger,
-                    pendingIntent
-                )
-            ) {
-                return
-            }
-
-            ReminderStore.saveReminder(
-                context = this,
-                alarmId = alarmId,
-                taskText = taskText,
-                dueAt = dueAt,
-                repeatInterval = repeatInterval
-            )
-
-            Log.i(
-                tag,
-                "Alarm kaydedildi: $taskText / tekrar: $repeatInterval"
-            )
-
-        } catch (error: Exception) {
-
-            Log.e(
-                tag,
-                "Hatırlatma kurulamadı",
-                error
-            )
-        }
-    }
-
-    // ==========================================
-    // TARIHE GORE ALARM IPTALI
-    // ==========================================
-
-    private fun cancelReminderByDueAt(
-        dueAt: String
-    ) {
-
-        val item =
-            ReminderStore.findByDueAt(
-                this,
-                dueAt
-            )
-
-        cancelReminderByAlarmId(
-            item?.alarmId ?: dueAt
-        )
-    }
-
-    // ==========================================
-    // METNE GORE ALARM IPTALI
-    // ==========================================
-
-    private fun cancelReminderByTaskText(
-        taskText: String
-    ) {
-
-        val item =
-            ReminderStore.getAllReminders(this)
-                .firstOrNull {
-                    it.taskText == taskText
-                }
-
-        if (item != null) {
-
-            cancelReminderByAlarmId(
-                item.alarmId
-            )
-        }
-    }
-
-    // ==========================================
-    // KIMLIGE GORE ALARM IPTALI
-    // ==========================================
-
-    private fun cancelReminderByAlarmId(
-        alarmId: String
-    ) {
-
-        try {
-
-            val intent = Intent(
-                this,
-                ReminderReceiver::class.java
-            )
-
-            val pendingIntent =
-                PendingIntent.getBroadcast(
-                    this,
-                    alarmId.hashCode(),
-                    intent,
-                    PendingIntent.FLAG_NO_CREATE or
-                            PendingIntent.FLAG_IMMUTABLE
-                )
-
-            if (pendingIntent != null) {
-
-                getSystemService(
-                    AlarmManager::class.java
-                ).cancel(pendingIntent)
-
-                pendingIntent.cancel()
-            }
-
-            ReminderStore.removeReminder(
-                this,
-                alarmId
-            )
-
-            Log.i(
-                tag,
-                "Alarm iptal edildi: $alarmId"
-            )
-
-        } catch (error: Exception) {
-
-            Log.e(
-                tag,
-                "Alarm iptal hatası: $alarmId",
-                error
-            )
-        }
-    }
-
-    // ==========================================
-    // TUM ALARMLARI IPTAL ET
-    // ==========================================
-
-    private fun cancelAllStoredReminders() {
-
-        ReminderStore.getAllReminders(this)
-            .forEach { reminder ->
-
-                cancelReminderByAlarmId(
-                    reminder.alarmId
-                )
-            }
-
-        ReminderStore.clearAll(this)
-    }
-
-    // ==========================================
-    // PYTHON TARIHINI OKU
-    // ==========================================
-
-    private fun parseDueAtMillis(
-        dueAt: String
-    ): Long? {
-
-        val normalized =
-            dueAt.replace(
-                Regex(
-                    "\\.(\\d{3})\\d*(?=[+-]\\d{2}:\\d{2}$)"
-                ),
-                ".$1"
-            )
-
-        val formats = listOf(
-            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
-            "yyyy-MM-dd'T'HH:mm:ssXXX"
-        )
-
-        for (pattern in formats) {
-
-            try {
-
-                val formatter =
-                    SimpleDateFormat(
-                        pattern,
-                        Locale.US
-                    ).apply {
-                        isLenient = false
-                    }
-
-                val result =
-                    formatter.parse(normalized)
-
-                if (result != null) {
-                    return result.time
-                }
-
-            } catch (_: Exception) {
-            }
-        }
-
-        Log.e(
-            tag,
-            "Tarih çözümlenemedi: $dueAt"
-        )
-
-        return null
-    }
-
-    private fun isValidDueAt(
-        dueAt: String
-    ): Boolean {
-
-        return dueAt.isNotBlank() &&
-                dueAt != "null"
-    }
+    private fun isValidDueAt(dueAt: String): Boolean =
+        ZoroReminders.isValidDueAt(dueAt)
 
     // ==========================================
     // UYGULAMA KAPANIRKEN
@@ -2438,11 +2093,10 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
             commandReceiverRegistered = false
         }
 
-        if (::textToSpeech.isInitialized) {
+        isAlive = false
 
-            textToSpeech.stop()
-            textToSpeech.shutdown()
-        }
+        speaker?.shutdown()
+        speaker = null
 
         httpClient.dispatcher.cancelAll()
 
@@ -2556,7 +2210,8 @@ fun ZoroApp(
         ZoroTaskOperation
     ) -> Unit,
     lastReply: String = "",
-    askText: (String) -> Unit = {}
+    askText: (String) -> Unit = {},
+    openSettings: () -> Unit = {}
 ) {
 
     val red = Color(0xFFB71C1C)
@@ -3554,6 +3209,29 @@ fun ZoroApp(
                                 }
                             }
                         }
+                    }
+                }
+
+                // ZORO 2.1: ozellikleri ac/kapa, aylik maliyet
+                Card(
+                    onClick = openSettings,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = lightBlue)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "⚙️ Ayarlar ve maliyet",
+                            color = darkBlue,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(5.dp))
+                        Text(
+                            text = "Özellikleri açıp kapatın, aylık maliyeti görün",
+                            color = Color.Gray,
+                            fontSize = 11.sp
+                        )
                     }
                 }
 

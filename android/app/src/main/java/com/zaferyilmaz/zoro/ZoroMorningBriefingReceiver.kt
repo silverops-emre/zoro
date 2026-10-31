@@ -40,6 +40,19 @@ class ZoroMorningBriefingReceiver : BroadcastReceiver() {
         ZoroMorningBriefingScheduler.scheduleNext(context)
         val appContext = context.applicationContext
 
+        // ZORO 2.1: ozet kapatildiysa hic okunmaz.
+        if (!ZoroPrefs.briefingEnabled(appContext)) {
+            pendingResult.finish()
+            return
+        }
+
+        // ZORO 2.1: ses servisi aciksa ozet sunucudan (hava, takvim, aramalar,
+        // kur, istenirse haber) alinir ve servis okur.
+        if (ZoroVoiceService.runBriefing()) {
+            pendingResult.finish()
+            return
+        }
+
         Thread {
             try {
                 val message = buildMorningBriefing(appContext)

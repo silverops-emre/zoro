@@ -45,7 +45,7 @@ Eylemler
 - Varsayılanlar (sorma, uygula ve cevapta tarih/saati söyle ki kullanıcı düzeltebilsin): gün adı ("cuma") bir sonraki o gündür; "sabah" denmedikçe "saat 1"–"saat 7" öğleden sonradır (13:00–19:00); "haftaya" 7 gün sonradır.
 - Takvim sorusunda ("toplantım ne zaman") en yakın uygun etkinliği söyle; birden fazla varsa ilkini söyle, diğerlerini kısaca an. Hangisi diye sorma.
 - Silme işlemlerinde sadece aracı çağır; onayı sistem kullanıcıya soracak.
-- Takvimde "salt okunur" yazan etkinlikler değiştirilemez ve silinemez; diğerleri değiştirilebilir.
+- Takvimde "Zoro değiştiremez" yazan etkinlikleri değiştirme ya da silme; kullanıcıya bunu telefonun takvim uygulamasından yapabileceğini kısaca söyle.
 - "Beni kim aradı", "cevapsız arama var mı" → bağlamdaki son aramalar listesinden cevap ver. "Onu geri ara" → call_contact, call_ref ile ([c1] gibi). Liste yoksa bu bilgiyi göremediğini söyle.
 - "Beni X'e götür", "X'e yol tarifi" → hemen navigate çağır; ulaşım şekli söylenmediyse driving kullan, sorma. "X'i ara" → call_contact. "X'e yaz", "mesaj at" → send_message (taslak açılır, gönder tuşuna kullanıcı basar; bunu söyle).
 - Bağlamdaki "Telefonun yapabildikleri" listesinde olmayan bir telefon işini yapamazsın. Bunu söyle ve uygulamanın güncellenmesi gerektiğini ekle; yerine sözlü yol tarifi gibi doğrulayamayacağın bir şey teklif etme.
@@ -139,7 +139,7 @@ def context_block(turn: Turn, message: str) -> str:
                     else f"{human_time(ev.start, now)}–{ev.end.strftime('%H:%M')}")
             where = f" @ {ev.location}" if ev.location else ""
             source = ("Zoro" if ev.source.upper() == "ZORO"
-                      else "telefon takvimi" if ev.editable else "telefon takvimi, salt okunur")
+                      else "telefon takvimi" if ev.editable else "telefon takvimi, Zoro değiştiremez")
             lines.append(f"- [{ev.ref}] {when} {ev.title}{where} ({source})")
 
     if turn.recent_calls:
@@ -380,8 +380,8 @@ def briefing_message(turn: Turn) -> str:
     ]
     if turn.recent_calls:
         parts.append("Dünden beri cevapsız arama varsa kimden olduğunu söyle.")
-    parts.append("Dolar ve euro kurunu söyle.")
+    parts.append("Dolar ve euro için yalnızca satış kurunu yuvarlayarak söyle (örn. dolar 49 lira 86 kuruş).")
     if turn.web_search:
         parts.append("Web aramasıyla bugün Türkiye'deki en önemli tek haberi bul ve bir cümleyle söyle.")
-    parts.append("Toplam en fazla 7 kısa cümle, liste okur gibi değil konuşur gibi.")
+    parts.append("Boş olan başlıkları tek cümlede birleştir. Toplam en fazla 6 kısa cümle, liste okur gibi değil konuşur gibi.")
     return " ".join(parts)

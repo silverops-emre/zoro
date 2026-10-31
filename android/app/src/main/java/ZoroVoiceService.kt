@@ -38,6 +38,11 @@ class ZoroVoiceService : Service() {
 
         const val EXTRA_COMMAND = "voice_command"
 
+        // Yalnizca debug derleme ve disa kapali servis (root/adb): emulatorde
+        // sesli komutu taklit etmek icin. "__briefing__" sabah ozetini baslatir.
+        const val ACTION_TEST_COMMAND =
+            "com.zaferyilmaz.zoro.TEST_COMMAND"
+
         // Yeni: Ana ekrana dinleme durumunu bildirir.
         const val ACTION_STATUS =
             "com.zaferyilmaz.zoro.VOICE_STATUS"
@@ -76,7 +81,19 @@ class ZoroVoiceService : Service() {
 
         val isActive: Boolean
             get() = active?.running == true
+
+        // ZORO 2.1: sabah ozeti alarmi geldiginde servis aciksa ozet
+        // sunucudan alinir ve servis okur. Kapaliysa false (eski yol).
+        fun runBriefing(): Boolean {
+            val service = active?.takeIf { it.running } ?: return false
+            service.handler.post { ZoroHeadless.briefing(service) }
+            return true
+        }
     }
+
+    // ZORO 2.1: ekran kapaliyken cevaplari okuyan motor (dogal ses / telefon sesi).
+    private var speaker: ZoroSpeaker? = null
+    private val afterReply = mutableMapOf<String, Pair<(() -> Unit)?, Boolean>>()
 
     private val handler = Handler(Looper.getMainLooper())
     private val turkish = Locale.forLanguageTag("tr-TR")
@@ -185,6 +202,7 @@ class ZoroVoiceService : Service() {
 
         createNotificationChannel()
         initializeTextToSpeech()
+        speaker = ZoroSpeaker(this) { id, completed -> onReplyFinished(id, completed) }
 
         Log.i(
             TAG,
@@ -205,6 +223,20 @@ class ZoroVoiceService : Service() {
         if (intent?.action == ACTION_STOP) {
 
             stopSelf()
+            return START_NOT_STICKY
+        }
+
+        if (BuildConfig.DEBUG && intent?.action == ACTION_TEST_COMMAND) {
+
+            val text = intent.getStringExtra(EXTRA_COMMAND).orEmpty()
+
+            if (running && text.isNotBlank()) {
+                handler.post {
+                    if (text == "__briefing__") ZoroHeadless.briefing(this)
+                    else sendVoiceCommand(text)
+                }
+            }
+
             return START_NOT_STICKY
         }
 
@@ -411,6 +443,9 @@ class ZoroVoiceService : Service() {
                 ) {
 
                     tts?.language = turkish
+                    tts?.let { engine ->
+                        ZoroSpeaker.bestTurkishVoice(engine)?.let { engine.voice = it }
+                    }
                     tts?.setPitch(0.85f)
                     tts?.setSpeechRate(0.95f)
 
@@ -980,6 +1015,12 @@ class ZoroVoiceService : Service() {
             "Zoro komutu: $cleaned"
         )
 
+        // ZORO 2.1: ekran tamamen kapatilmissa komutu servis kendisi isler.
+        if (!MainActivity.isAlive && ZoroPrefs.backgroundCommands(this)) {
+            ZoroHeadless.handleCommand(this, cleaned)
+            return
+        }
+
         val broadcast = Intent(
             ACTION_COMMAND
         ).apply {
@@ -993,6 +1034,57 @@ class ZoroVoiceService : Service() {
         }
 
         sendBroadcast(broadcast)
+    }
+
+    // ==========================================
+    // ZORO 2.1: EKRANSIZ CEVABI OKU, SONRA YAP
+    // ==========================================
+
+    fun speakReply(
+        text: String,
+        listenForReply: Boolean,
+        after: (() -> Unit)?
+    ) {
+
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post { speakReply(text, listenForReply, after) }
+            return
+        }
+
+        val engine = speaker
+
+        if (text.isBlank() || engine == null) {
+            after?.invoke()
+            return
+        }
+
+        val id = "ZORO_BG_" + System.nanoTime()
+        afterReply[id] = after to listenForReply
+
+        pauseListeningForSpeech()
+        engine.speak(text, id)
+    }
+
+    private fun onReplyFinished(
+        id: String,
+        completed: Boolean
+    ) {
+
+        val entry = afterReply.remove(id) ?: return
+
+        try {
+            // Yarida kesilen cevabin isi (orn. arama) yapilmaz.
+            if (completed) {
+                entry.first?.invoke()
+            }
+        } catch (error: Exception) {
+            Log.e(TAG, "Cevap sonrasi islem hatasi", error)
+        }
+
+        // after() yeni bir konusma baslattiysa dinleme onun bitisini bekler.
+        if (afterReply.isEmpty()) {
+            resumeListeningAfterSpeech(listenForReply = completed && entry.second)
+        }
     }
 
     // ==========================================
@@ -1035,6 +1127,10 @@ class ZoroVoiceService : Service() {
         tts?.stop()
         tts?.shutdown()
         tts = null
+
+        speaker?.shutdown()
+        speaker = null
+        afterReply.clear()
 
         Log.i(
             TAG,

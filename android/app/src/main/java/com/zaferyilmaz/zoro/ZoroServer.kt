@@ -1,7 +1,10 @@
 package com.zaferyilmaz.zoro
 
+import android.content.Context
+import android.util.Log
 import okhttp3.Credentials
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -81,10 +84,22 @@ object ZoroServer {
     // /ask ISTEK GOVDESI
     // ==========================================
 
+    // Telefonda olan ve sunucunun bilmedigi son durum (orn. rehberde iki "Okay").
+    // Bir sonraki istekle sunucuya gider. Ekran ve ses servisi ortak kullanir.
+    @Volatile
+    var clientNote: String? = null
+
+    fun takeClientNote(): String? {
+        val note = clientNote
+        clientNote = null
+        return note
+    }
+
     fun askBody(
         message: String,
         calendar: JSONArray?,
-        clientNote: String? = null
+        clientNote: String? = null,
+        recentCalls: JSONArray? = null
     ): JSONObject {
 
         val client = JSONObject()
@@ -104,9 +119,52 @@ object ZoroServer {
             context.put("client_note", clientNote.take(500))
         }
 
+        if (recentCalls != null) {
+            context.put("recent_calls", recentCalls)
+        }
+
         return JSONObject()
             .put("message", message)
             .put("client", client)
             .put("context", context)
+    }
+
+    // ==========================================
+    // ZORO 2.1: SUNUCU OZELLIKLERI VE AYARLARI
+    // ==========================================
+    // Acilista bir kez: sunucu yeni ozellikleri biliyor mu, ayarlar ne?
+    // Basarisiz olursa son bilinen degerler kalir. Arka planda cagrilir.
+
+    fun syncSettings(context: Context, client: OkHttpClient) {
+
+        try {
+            client.newCall(Request.Builder().url(url("/version")).get().build())
+                .execute().use { response ->
+                    if (response.isSuccessful) {
+                        val json = JSONObject(response.body?.string().orEmpty())
+                        ZoroPrefs.setServerFeatures(context, json.optJSONArray("features"))
+                    } else if (response.code == 404) {
+                        // Eski sunucu (ya da geri alinmis surum): yeni ozellikler kapanir.
+                        ZoroPrefs.setServerFeatures(context, null)
+                    }
+                }
+
+            if (ZoroPrefs.serverHas(context, "settings")) {
+                client.newCall(Request.Builder().url(url("/settings")).get().build())
+                    .execute().use { response ->
+                        if (response.isSuccessful) {
+                            val json = JSONObject(response.body?.string().orEmpty())
+                            json.optJSONObject("settings")?.let {
+                                ZoroPrefs.applyServerSettings(context, it)
+                            }
+                        }
+                    }
+            }
+
+            ZoroMorningBriefingScheduler.scheduleNext(context)
+
+        } catch (error: Exception) {
+            Log.w("ZORO_SERVER", "Sunucu ayarlari alinamadi", error)
+        }
     }
 }
