@@ -55,6 +55,20 @@ CREATE TABLE IF NOT EXISTS pending (
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS usage (
+    seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at    TEXT NOT NULL,
+    month         TEXT NOT NULL,
+    feature       TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    searches      INTEGER NOT NULL DEFAULT 0,
+    cost_usd      REAL,
+    turn_id       TEXT
+);
+CREATE INDEX IF NOT EXISTS usage_month ON usage(month);
 """
 
 TASK_FIELDS = "id, text, done, due_at, notified, repeat_interval, created_at"
@@ -301,6 +315,40 @@ class Store:
                 "UPDATE pending SET status = ? WHERE id = ? AND status = 'pending'", (status, pending_id)
             )
             return cur.rowcount == 1
+
+    # --------------------------------------------------------------- usage
+    def add_usage(self, *, created_at: datetime, feature: str, model: str, input_tokens: int = 0,
+                  cached_tokens: int = 0, output_tokens: int = 0, searches: int = 0,
+                  cost_usd: float | None = None, turn_id: str | None = None) -> None:
+        """One metered OpenAI call. cost_usd None = model price unknown."""
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO usage(created_at, month, feature, model, input_tokens, cached_tokens, "
+                "output_tokens, searches, cost_usd, turn_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (created_at.isoformat(timespec="seconds"), created_at.strftime("%Y-%m"), feature, model,
+                 int(input_tokens), int(cached_tokens), int(output_tokens), int(searches), cost_usd, turn_id),
+            )
+
+    def usage_rows(self, month: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT created_at, feature, model, input_tokens, cached_tokens, output_tokens, searches, "
+                "cost_usd, turn_id FROM usage WHERE month = ? ORDER BY seq", (month,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def usage_since(self, since: datetime) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT created_at, feature, turn_id FROM usage WHERE created_at >= ? ORDER BY seq",
+                (since.isoformat(timespec="seconds"),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def month_cost(self, month: str) -> float:
+        with self.connect() as conn:
+            value = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM usage WHERE month = ?", (month,)).fetchone()[0]
+        return float(value or 0)
 
     # ------------------------------------------------------- legacy import
     def import_legacy(self, history_file: Path, tasks_file: Path, personal_file: Path) -> dict[str, int]:

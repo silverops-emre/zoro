@@ -329,7 +329,7 @@ def test_briefing_uses_the_model(h):
     h.script(resp("Günaydın."))
     r = h.client.post("/briefing", json={"client": {"version": 2, "capabilities": ["calendar"]}, "context": {"calendar": []}})
     assert r.get_json()["reply"] == "Günaydın."
-    assert "brifing" in h.calls[0]["input"][-1]["content"]
+    assert "sabah özeti" in h.calls[0]["input"][-1]["content"]
 
 
 def test_memory_import_dedupes(h):

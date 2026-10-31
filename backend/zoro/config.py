@@ -20,6 +20,13 @@ def _int(value: str | None, default: int) -> int:
         return default
 
 
+def _float(value: str | None, default: float) -> float:
+    try:
+        return max(0.0, float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass(frozen=True)
 class Config:
     base_dir: Path
@@ -35,6 +42,12 @@ class Config:
     max_tool_rounds: int = 4
     history_messages: int = 16
     web_search: bool = False
+    # Natural voice (POST /tts). OpenAI shuts gpt-4o-mini-tts down on
+    # 2027-01-06; after that the phone falls back to its own voice.
+    tts_model: str = "gpt-4o-mini-tts"
+    tts_voice: str = "marin"
+    # Paid extras switch off once a month's spend reaches this (0 = no limit).
+    monthly_budget_usd: float = 10.0
 
     # App-level key checked in the X-Zoro-Key header. Empty = disabled
     # (Caddy basic auth in front of the app still applies).
@@ -68,6 +81,9 @@ def load_config(base_dir: Path | None = None) -> Config:
         max_tool_rounds=max(1, _int(os.environ.get("ZORO_MAX_TOOL_ROUNDS"), 4)),
         history_messages=max(0, _int(os.environ.get("ZORO_HISTORY_MESSAGES"), 16)),
         web_search=_bool(os.environ.get("ZORO_WEB_SEARCH"), False),
+        tts_model=os.environ.get("ZORO_TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts",
+        tts_voice=os.environ.get("ZORO_TTS_VOICE", "marin").strip() or "marin",
+        monthly_budget_usd=_float(os.environ.get("ZORO_MONTHLY_BUDGET_USD"), 10.0),
         api_key=(os.environ.get("ZORO_API_KEY") or "").strip(),
         timezone=os.environ.get("ZORO_TZ", "Europe/Istanbul"),
         user_title=os.environ.get("ZORO_USER_TITLE", "Zafer Bey"),

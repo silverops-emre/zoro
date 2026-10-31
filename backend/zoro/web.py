@@ -8,17 +8,19 @@ import time
 from datetime import timedelta
 from typing import Any, Callable
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_with_context
 from werkzeug.exceptions import HTTPException
 
-from . import legacy_rules
+from . import costs, info, legacy_rules, settings as user_settings, voice
 from .brain import AIUnavailable, Brain, briefing_message, build_response
 from .config import Config, load_config
 from .store import Store
 from .timeutil import DAILY_MS, from_millis, iso, now_in, parse_iso, zone
-from .tools import ALL_CAPS, CalendarEvent, ClientInfo, Turn, cancel_action
+from .tools import ALL_CAPS, CalendarEvent, CallEntry, ClientInfo, Turn, cancel_action
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
+SERVER_FEATURES = ["settings", "usage", "tts", "recent_calls", "calendar_write"]
+MAX_TTS_CHARS = 1200
 log = logging.getLogger("zoro.web")
 
 
@@ -60,8 +62,32 @@ def parse_calendar(context: dict[str, Any], turn: Turn, limit: int = 80) -> list
             location=" ".join(str(item.get("location") or "").split())[:120],
             source=str(item.get("source") or "ZORO")[:60],
             all_day=bool(item.get("all_day")),
+            writable=item.get("writable") is True,
         ))
     return result
+
+
+def parse_calls(context: dict[str, Any], turn: Turn, limit: int = 10) -> list[CallEntry] | None:
+    raw = context.get("recent_calls")
+    if not isinstance(raw, list):
+        return None
+    oldest = turn.now - timedelta(hours=48)
+    calls = []
+    for item in raw[:50]:
+        if not isinstance(item, dict):
+            continue
+        when = from_millis(item.get("time_ms"), turn.tz)
+        number = "".join(ch for ch in str(item.get("number") or "") if ch.isdigit() or ch == "+")[:20]
+        kind = str(item.get("type") or "")
+        if when is None or when < oldest or when > turn.now + timedelta(minutes=5) or not number:
+            continue
+        if kind not in ("missed", "incoming", "outgoing", "rejected"):
+            continue
+        name = " ".join(str(item.get("name") or "").split())[:80]
+        calls.append((when, name, number, kind))
+    calls.sort(key=lambda c: c[0], reverse=True)
+    return [CallEntry(ref=f"c{i}", name=name, number=number, kind=kind, when=when)
+            for i, (when, name, number, kind) in enumerate(calls[:limit], 1)]
 
 
 def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | None = None) -> Flask:
@@ -97,6 +123,10 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
         tz = zone(context.get("tz") if isinstance(context.get("tz"), str) else None, cfg.timezone)
         turn = Turn(cfg=cfg, store=store, tz=tz, now=now_in(tz), client=parse_client(data))
         turn.calendar = parse_calendar(context, turn)
+        turn.recent_calls = parse_calls(context, turn)
+        current = user_settings.load(store, cfg)
+        turn.web_search = bool(current["web_search"]) and user_settings.paid_allowed(
+            store, current, turn.now.strftime("%Y-%m"))
         note = context.get("client_note")
         turn.client_note = " ".join(str(note).split())[:500] if isinstance(note, str) else ""
         turn.pending = store.active_pending(turn.now)
@@ -160,7 +190,75 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
     def briefing():
         data = request.get_json(silent=True) or {}
         turn = new_turn(data if isinstance(data, dict) else {})
+        turn.feature = "sabah_ozeti"
         return jsonify(run_brain(turn, briefing_message(turn)))
+
+    # ------------------------------------- settings, costs, natural voice
+
+    def openai_client() -> Any:
+        return brain().client
+
+    def usd_try() -> float | None:
+        rate = info.exchange_rates(["USD"]).get("kurlar", {}).get("USD", {})
+        return rate.get("doviz_satis")
+
+    @app.get("/settings")
+    def get_settings():
+        return jsonify({"success": True, "settings": user_settings.load(store, cfg),
+                        "voices": user_settings.VOICES})
+
+    @app.put("/settings")
+    def put_settings():
+        accepted, errors = user_settings.validate(request.get_json(silent=True))
+        if errors:
+            return jsonify({"success": False, "reply": " ".join(errors), "errors": errors}), 400
+        saved = user_settings.save(store, cfg, accepted)
+        return jsonify({"success": True, "settings": saved, "voices": user_settings.VOICES})
+
+    @app.get("/usage")
+    def usage():
+        now = now_in(zone(cfg.timezone))
+        current = user_settings.load(store, cfg)
+        return jsonify({"success": True, **costs.summary(store, current, cfg.model, cfg.tts_model, now, usd_try)})
+
+    @app.post("/tts")
+    def tts():
+        data = request.get_json(silent=True) or {}
+        text = " ".join(str(data.get("text") or "").split()) if isinstance(data, dict) else ""
+        if not text or len(text) > MAX_TTS_CHARS:
+            return jsonify({"success": False, "error": "bad_text"}), 400
+        now = now_in(zone(cfg.timezone))
+        current = user_settings.load(store, cfg)
+        preview = isinstance(data, dict) and data.get("preview") is True
+        if not current["natural_voice"] and not preview:
+            return jsonify({"success": False, "error": "disabled"}), 409
+        if not user_settings.paid_allowed(store, current, now.strftime("%Y-%m")):
+            return jsonify({"success": False, "error": "budget"}), 402
+        chosen = data.get("voice") if preview and data.get("voice") in user_settings.VOICES else current["voice"]
+        events = voice.speech_events(openai_client(), cfg.tts_model, chosen, text, timeout=15.0)
+        try:
+            first = next(events)  # surface upstream errors as a status code, not a broken stream
+        except (voice.VoiceUnavailable, StopIteration) as error:
+            log.warning("tts unavailable: %s", error)
+            return jsonify({"success": False, "error": "voice_unavailable"}), 502
+
+        def stream():
+            pending = [first]
+            try:
+                while True:
+                    kind, payload = pending.pop() if pending else next(events)
+                    if kind == "audio":
+                        yield payload
+                    elif kind == "usage":
+                        costs.record_speech(store, now, cfg.tts_model, payload)
+            except StopIteration:
+                return
+            except voice.VoiceUnavailable as error:
+                log.warning("tts stream cut: %s", error)
+
+        return Response(stream_with_context(stream()), mimetype="application/octet-stream",
+                        headers={"X-Zoro-Audio": f"pcm_s16le;rate={voice.SAMPLE_RATE};channels=1",
+                                 "Cache-Control": "no-store"})
 
     # ------------------------------------------------ v1 task endpoints
 
@@ -248,6 +346,7 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
 
     @app.get("/version")
     def version():
-        return jsonify({"version": VERSION, "model": cfg.model, "daily_ms": DAILY_MS})
+        return jsonify({"version": VERSION, "model": cfg.model, "daily_ms": DAILY_MS,
+                        "features": SERVER_FEATURES})
 
     return app

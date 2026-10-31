@@ -9,6 +9,7 @@ answer with yes/no.
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -61,10 +62,21 @@ class CalendarEvent:
     location: str
     source: str
     all_day: bool
+    writable: bool = False  # phone calendar event the phone may change (setting on, not recurring)
 
     @property
     def editable(self) -> bool:
-        return self.source.upper() == "ZORO"
+        return self.source.upper() == "ZORO" or self.writable
+
+
+@dataclass
+class CallEntry:
+    """A recent call from the phone's call log."""
+    ref: str
+    name: str
+    number: str
+    kind: str  # missed | incoming | outgoing | rejected
+    when: datetime
 
 
 @dataclass
@@ -86,11 +98,19 @@ class Turn:
     message: str = ""
     client_note: str = ""  # what the phone did/asked after the last reply
     deadline: float | None = None  # time.monotonic() limit for this turn
+    recent_calls: list[CallEntry] | None = None  # None = phone did not send its call log
+    web_search: bool = False  # setting on and monthly budget not reached
+    feature: str = "beyin"  # cost bucket for this turn's model calls
+    turn_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def set_legacy(self, fields: dict[str, Any]) -> None:
         # The v1 app understands a single action per response: keep the first.
         if self.legacy is None:
             self.legacy = fields
+
+    def call(self, ref: str) -> CallEntry | None:
+        ref = (ref or "").strip()
+        return next((c for c in self.recent_calls or [] if c.ref == ref), None)
 
     def event(self, ref: str) -> CalendarEvent | None:
         ref = (ref or "").strip()
@@ -437,7 +457,7 @@ def t_calendar_update(turn: Turn, event_id: str, title: str | None, start: str |
     if ev is None:
         return fail("Etkinlik bulunamadı; bağlamdaki [e...] kimliklerinden birini kullan.")
     if not ev.editable:
-        return fail("Bu etkinlik telefonun takviminden geliyor, Zoro değiştiremez.")
+        return fail("Bu etkinlik telefon takviminde salt okunur (tekrarlayan etkinlik ya da Google Takvim yazma ayarı kapalı), Zoro değiştiremez.")
     new_start, new_end = ev.start, ev.end
     if start:
         new_start, error = parse_future(turn, start, "Yeni başlangıç")
@@ -473,7 +493,7 @@ def t_calendar_delete(turn: Turn, event_id: str) -> dict[str, Any]:
     if ev is None:
         return fail("Etkinlik bulunamadı; bağlamdaki [e...] kimliklerinden birini kullan.")
     if not ev.editable:
-        return fail("Bu etkinlik telefonun takviminden geliyor, Zoro silemez.")
+        return fail("Bu etkinlik telefon takviminde salt okunur (tekrarlayan etkinlik ya da Google Takvim yazma ayarı kapalı), Zoro silemez.")
     return request_confirmation(
         turn, "calendar_delete", {"event_id": ev.id, "title": ev.title},
         f"{describe_event(turn, ev)} etkinliği",
@@ -489,7 +509,15 @@ def t_navigate(turn: Turn, destination: str, mode: str) -> dict[str, Any]:
     return ok(acilacak=destination)
 
 
-def t_call_contact(turn: Turn, name: str, phone_number: str | None) -> dict[str, Any]:
+def t_call_contact(turn: Turn, name: str, phone_number: str | None, call_ref: str | None = None) -> dict[str, Any]:
+    if call_ref:
+        entry = turn.call(call_ref)
+        if entry is None:
+            return fail("Arama kaydı bulunamadı; bağlamdaki [c...] kimliklerinden birini kullan.")
+        # The number comes from the phone's own call log, not from text.
+        turn.actions.append({"type": "call", "name": entry.name, "number": entry.number, "from_call_log": True})
+        turn.notes.append(f"{entry.name or 'numara'} geri aranıyor")
+        return ok(aranacak=entry.name or "kayıtlı olmayan numara")
     name = clean_text(name, 80)
     number = "".join(ch for ch in str(phone_number or "") if ch.isdigit() or ch == "+")
     said = "".join(ch for ch in turn.message if ch.isdigit())
@@ -705,6 +733,7 @@ _register(CAP_NAVIGATE, _fn("navigate", "Google Haritalar'da yol tarifini başla
 _register(CAP_CALL, _fn("call_contact", "Rehberdeki birini ya da bir numarayı arar.", {
     "name": {**S, "description": "Rehberdeki ismin yalın hali, ekleri at: 'Okay'ı ara' → 'Okay', 'Ahmet Demir'i' → 'Ahmet Demir'."},
     "phone_number": {**S_NULL, "description": "Kullanıcı numara söylediyse."},
+    "call_ref": {**S_NULL, "description": "Son aramalar listesinden geri aramak için [c1] gibi kimlik; yoksa null."},
 }), t_call_contact)
 _register(CAP_MESSAGE, _fn("send_message", "SMS ya da WhatsApp mesaj taslağı açar; kullanıcı kendisi gönderir.", {
     "app": {"type": "string", "enum": ["whatsapp", "sms"]},
@@ -736,8 +765,12 @@ def tool_specs(turn: Turn) -> list[dict[str, Any]]:
             specs.append(spec)
     if turn.pending:
         specs.append(CONFIRM_SPEC)
-    if turn.cfg.web_search:
-        specs.append({"type": "web_search"})
+    if turn.web_search:
+        specs.append({
+            "type": "web_search",
+            "user_location": {"type": "approximate", "country": "TR", "city": turn.cfg.home_city,
+                              "timezone": turn.cfg.timezone},
+        })
     return specs
 
 
