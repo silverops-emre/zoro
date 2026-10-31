@@ -62,7 +62,9 @@ def validate(changes: Any) -> tuple[dict[str, Any], list[str]]:
             errors.append("Bilinmeyen ses.")
     if "monthly_budget_usd" in changes:
         value = changes["monthly_budget_usd"]
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 1000:
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < 0.01:
+            errors.append("Bütçe en az 0,01 dolar olmalı (0 = sınırsız).")
+        elif isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 1000:
             accepted["monthly_budget_usd"] = round(float(value), 2)
         else:
             errors.append("Aylık bütçe 0 ile 1000 dolar arasında olmalı (0 = sınırsız).")
@@ -75,10 +77,9 @@ def validate(changes: Any) -> tuple[dict[str, Any], list[str]]:
 
 
 def save(store: Store, cfg: Config, changes: dict[str, Any]) -> dict[str, Any]:
-    current = load(store, cfg)
-    current.update(changes)
-    store.set_meta(META_KEY, json.dumps(current, ensure_ascii=False))
-    return current
+    # Merged under a write lock: two switches flipped at once must not undo each other.
+    store.update_json_meta(META_KEY, lambda saved: {**saved, **changes})
+    return load(store, cfg)
 
 
 def paid_allowed(store: Store, settings: dict[str, Any], month: str) -> bool:

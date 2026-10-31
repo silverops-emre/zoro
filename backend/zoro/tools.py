@@ -9,6 +9,7 @@ answer with yes/no.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -476,14 +477,19 @@ def t_calendar_update(turn: Turn, event_id: str, title: str | None, start: str |
         return fail("Yeni saatte başka etkinlik var, değiştirilmedi.",
                     cakisan=[describe_event(turn, c) for c in clash[:3]])
     new_title = clean_text(title, 120) or ev.title
-    turn.actions.append({
+    action: dict[str, Any] = {
         "type": "calendar_update",
         "event_id": ev.id,
-        "title": new_title,
         "start_ms": to_millis(new_start),  # type: ignore[arg-type]
         "end_ms": to_millis(new_end),  # type: ignore[arg-type]
-        "location": clean_text(location, 120) if location is not None else ev.location,
-    })
+    }
+    # Only fields the user asked to change: the context copy of a phone event is
+    # shortened to one line of 120 characters and must not overwrite the real one.
+    if clean_text(title, 120):
+        action["title"] = new_title
+    if location is not None:
+        action["location"] = clean_text(location, 120)
+    turn.actions.append(action)
     turn.notes.append(f"{new_title} {human_time(new_start, turn.now)} olarak güncellendi")  # type: ignore[arg-type]
     return ok(guncellendi=new_title, zaman=human_time(new_start, turn.now))  # type: ignore[arg-type]
 
@@ -509,15 +515,27 @@ def t_navigate(turn: Turn, destination: str, mode: str) -> dict[str, Any]:
     return ok(acilacak=destination)
 
 
+CALL_REQUEST_RE = re.compile(r"\b(ara(?!ba)\w*|çevir\w*|geri\s+dön\w*)", re.IGNORECASE)
+
+
 def t_call_contact(turn: Turn, name: str, phone_number: str | None, call_ref: str | None = None) -> dict[str, Any]:
     if call_ref:
+        if turn.feature != "beyin" or not CALL_REQUEST_RE.search(turn.message):
+            # Calendar titles and web results are text an outsider controls:
+            # a call-back happens only when the user's own words ask for one.
+            return fail("Geri arama yalnızca kullanıcı açıkça aramamı isterse yapılır.")
         entry = turn.call(call_ref)
         if entry is None:
             return fail("Arama kaydı bulunamadı; bağlamdaki [c...] kimliklerinden birini kullan.")
         # The number comes from the phone's own call log, not from text.
         turn.actions.append({"type": "call", "name": entry.name, "number": entry.number, "from_call_log": True})
-        turn.notes.append(f"{entry.name or 'numara'} geri aranıyor")
-        return ok(aranacak=entry.name or "kayıtlı olmayan numara")
+        if not entry.name:
+            turn.notes.append("kayıtlı olmayan numara çeviricide açılıyor")
+            return ok(aranacak="kayıtlı olmayan numara",
+                      not_="Rehberde olmayan numara doğrudan aranmaz: numara çeviricide açılır, arama tuşuna "
+                           "kullanıcı basar. 'Arıyorum' deme, bunu söyle.")
+        turn.notes.append(f"{entry.name} geri aranıyor")
+        return ok(aranacak=entry.name)
     name = clean_text(name, 80)
     number = "".join(ch for ch in str(phone_number or "") if ch.isdigit() or ch == "+")
     said = "".join(ch for ch in turn.message if ch.isdigit())
@@ -758,10 +776,20 @@ CONFIRM_SPEC = _fn("confirm_pending", "Onay bekleyen işleme kullanıcının cev
 })
 
 
+# The unattended morning briefing only reads; it never acts on the phone.
+BRIEFING_TOOLS = {"get_weather", "get_exchange_rates"}
+
+
+def _tool_allowed(turn: Turn, name: str, cap: str | None) -> bool:
+    if turn.feature == "sabah_ozeti" and name not in BRIEFING_TOOLS:
+        return False
+    return cap is None or turn.client.can(cap)
+
+
 def tool_specs(turn: Turn) -> list[dict[str, Any]]:
     specs = []
-    for cap, spec, _ in REGISTRY.values():
-        if cap is None or turn.client.can(cap):
+    for name, (cap, spec, _) in REGISTRY.items():
+        if _tool_allowed(turn, name, cap):
             specs.append(spec)
     if turn.pending:
         specs.append(CONFIRM_SPEC)
@@ -784,7 +812,7 @@ def execute(turn: Turn, name: str, arguments: str) -> dict[str, Any]:
         if entry is None:
             return fail(f"'{name}' diye bir araç yok.")
         cap, _, impl = entry
-        allowed = cap is None or turn.client.can(cap)
+        allowed = _tool_allowed(turn, name, cap)
     if not allowed:
         return fail("Bu telefon bu işlemi desteklemiyor.")
     try:

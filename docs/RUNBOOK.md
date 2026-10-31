@@ -1,4 +1,4 @@
-# Zoro 2.0 — Kurulum ve geçiş kılavuzu
+# Zoro 2.1 — Kurulum ve geçiş kılavuzu
 
 Bu kılavuz Zafer Bey'in sunucusuna (Hetzner, Helsinki) yeni arka ucu ve telefonuna yeni uygulamayı kurmak içindir. **Hiçbir adım henüz yapılmadı.** Her adım Emre'nin "bas" demesiyle yapılır.
 
@@ -47,7 +47,11 @@ Betik sırasıyla şunları yapar:
 - **Veri:** İlk açılışta `zoro_memory.json`, `zoro_tasks.json` ve `zoro_personal_memory.json` aynı kimliklerle `zoro.db` içine aktarılır. JSON dosyaları silinmez.
 - **`.env`:** Dokunulmaz. İstenirse eklenebilecek ayarlar `.env.example` dosyasında:
   - `ZORO_REASONING_EFFORT=low`: model "reasoning" tipindeyse gecikmeyi düşürür.
-  - `ZORO_WEB_SEARCH=1`: güncel bilgi için web araması. Ücretlidir.
+  - `ZORO_WEB_SEARCH`, `ZORO_TTS_VOICE`, `ZORO_MONTHLY_BUDGET_USD`: yalnızca ilk değerlerdir. Sonrasını telefondaki **Ayarlar ve maliyet** ekranı belirler (`zoro.db` içinde saklanır).
+  - `ZORO_TTS_MODEL=gpt-4o-mini-tts`: doğal ses modeli. **OpenAI bu modeli 6 Ocak 2027'de kapatıyor.** O tarihten sonra telefon kendi sesine döner; sağlayıcı değişikliği ayrı iş.
+  - `ZORO_PRICE_OVERRIDES`: OpenAI fiyatı değişirse maliyet ekranı için düzeltme.
+- **Yeni bağımlılık yok.** `requirements.txt` aynı.
+- **Maliyet ölçümü:** Her OpenAI çağrısının token/arama sayısı `zoro.db` içindeki `usage` tablosuna yazılır. Telefonun maliyet ekranı bunu liste fiyatıyla (31.10.2026'da `developers.openai.com/api/docs/pricing` sayfasından) dolara, TCMB kuruyla liraya çevirir. Kesin fatura OpenAI panelindedir.
 - **Eski uygulama da çalışır:** Telefondaki mevcut uygulama yeni arka uçla konuşabilir. Hatırlatma, görev ve sohbet çalışır. Navigasyon, arama ve takvim değişikliği için yeni APK gerekir. Arka uç, eski uygulama için cevabı 9 saniyede keser, çünkü o uygulama 10 saniyede vazgeçiyor.
 
 **Telefonda dene (eski uygulamayla):** "Zoro, yarın sabah 9'da su içmemi hatırlat" → alarm kurulmalı.
@@ -91,7 +95,11 @@ Emülatörde denendi. Dışa aktarma, kaldırma, kurma ve geri yükleme adımlar
 
 `run-as` "package not debuggable" derse kurulu sürüm release imzalıdır. O zaman imza anahtarı mutlaka gerekir, yoksa yerel takvim elle taşınır.
 
-**İlk açılışta izinler:** mikrofon, bildirim, rehber ve arama. Rehber izni "Okay'ı ara" ve "Okay'a yaz" için gerekir.
+**İlk açılışta izinler:** mikrofon, bildirim, rehber, arama, takvim ve arama kaydı.
+- Rehber izni "Okay'ı ara" ve "Okay'a yaz" için gerekir.
+- Takvim izni Google Takvim'i görmek ve tek seferlik etkinlikleri taşıyıp silmek için gerekir.
+- Arama kaydı izni "Beni kim aradı?" için gerekir.
+- **Ayarlar ve maliyet** ekranında "Pil kısıtlamasını kaldır" düğmesine bir kez basılmalı; yoksa telefon kilitliyken Zoro'yu durdurabilir.
 
 ## 5. Yeni APK kurulduktan sonra (isteğe bağlı sıkılaştırma)
 
@@ -111,3 +119,13 @@ Sunucu `.env` dosyasına `ZORO_API_KEY=<rastgele uzun değer>` ekle, aynı değe
 | "Zoro, yarın 7'de beni uyandır" | Saat uygulamasında 07:00 alarmı |
 | "Zoro, hava nasıl?" / "Dolar kaç?" | Open-Meteo / TCMB'den okur |
 | İnternet kapalıyken "takvimde ne var" | Telefondaki yerel cevap |
+| **2.1** | |
+| Ana ekran → **Ayarlar ve maliyet** | Bu ayki tutar ($ ve ₺), ay sonu tahmini, bütçe, özellik düğmeleri |
+| Doğal ses aç → "Seçili sesi dinle" | Örnek cümle doğal sesle okunur |
+| "Zoro, beni kim aradı?" → "Onu geri ara" | Son aramayı söyler, aynı numarayı arar |
+| "Zoro, yarınki toplantıyı 3'e al" (Google Takvim'deki tek seferlik etkinlik) | Google Takvim'de 15:00'e taşınır |
+| "Zoro, toplantıyı sil" → "evet" | Google Takvim'den silinir; tekrarlayan etkinlikte "Zoro değiştiremez" der |
+| Güncel bilgiyi aç → "Kadıköy'de nöbetçi eczane hangisi?" | Web'den bulup söyler, bağlantı okumaz |
+| Uygulamadan geri tuşuyla çık, ekranı kilitle, "Zoro, yarın 9'da ilacımı hatırlat" | Ekran açılmadan alarm kurulur ve cevap okunur |
+| Ekran kilitliyken "Zoro, Okay'ı ara" | Ekran açılmadan arama başlar (**gerçek telefonda ilk kez denenecek**) |
+| Sabah özeti saatini 2 dk sonraya al | Hava, takvim, cevapsız aramalar, kur okunur; bildirim düşer |

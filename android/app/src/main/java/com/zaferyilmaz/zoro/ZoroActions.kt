@@ -186,10 +186,10 @@ object ZoroActions {
                         val updated = if (id.startsWith("android_"))
                             calendar.updateAndroidEvent(
                                 key = id,
-                                title = action.optString("title"),
+                                title = if (action.has("title")) action.optString("title") else null,
                                 startMillis = action.optLong("start_ms"),
                                 endMillis = action.optLong("end_ms"),
-                                location = action.optString("location")
+                                location = if (action.has("location")) action.optString("location") else null
                             )
                         else current != null &&
                                 calendar.updateLocalEvent(
@@ -204,7 +204,7 @@ object ZoroActions {
 
                         if (!updated) {
                             failures.add(
-                                "${action.optString("title")} güncellenemedi. " +
+                                "${action.optString("title").ifBlank { "Etkinlik" }} güncellenemedi. " +
                                         "Kayıt bulunamadı ya da yeni saatte başka bir kayıt var."
                             )
                         }
@@ -584,19 +584,24 @@ object ZoroActions {
 
         val name = action.optString("name")
 
-        // "Onu geri ara": numara telefonun kendi arama kaydindan geldi.
-        val logNumber = action.optString("number")
-        if (action.optBoolean("from_call_log") && ZoroCallLog.isRecentNumber(context, logNumber)) {
+        // "Onu geri ara": numara telefonun kendi arama kaydindan.
+        // Rehberde kayitliysa dogrudan aranir; kayitli degilse (tek calip kapanan
+        // ucretli hat olabilir) numara ceviricide acilir, arama tusuna kullanici basar.
+        val logged = if (action.optBoolean("from_call_log"))
+            ZoroCallLog.recentNumber(context, action.optString("number")) else null
+        if (logged != null) {
             val canCall = context.checkSelfPermission(Manifest.permission.CALL_PHONE) ==
                     PackageManager.PERMISSION_GRANTED
+            val direct = canCall && ZoroCallLog.isContact(context, logged)
             return Built(
                 intent = Intent(
-                    if (canCall) Intent.ACTION_CALL else Intent.ACTION_DIAL,
-                    Uri.parse("tel:" + Uri.encode(logNumber))
+                    if (direct) Intent.ACTION_CALL else Intent.ACTION_DIAL,
+                    Uri.parse("tel:" + Uri.encode(logged))
                 ),
-                label = "${name.ifBlank { logNumber }} aranıyor"
+                label = "${name.ifBlank { logged }} aranıyor"
             )
         }
+
         val resolved = resolveNumber(context, name, action.optString("number"))
 
         if (resolved.number == null && resolved.contactId > 0) {

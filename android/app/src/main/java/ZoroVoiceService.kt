@@ -95,6 +95,9 @@ class ZoroVoiceService : Service() {
     private var speaker: ZoroSpeaker? = null
     private val afterReply = mutableMapOf<String, Pair<(() -> Unit)?, Boolean>>()
 
+    // Arka arkaya en fazla iki kez "cevabi dinle" (televizyonla konusma dongusu olmasin).
+    private var followUpListens = 0
+
     private val handler = Handler(Looper.getMainLooper())
     private val turkish = Locale.forLanguageTag("tr-TR")
 
@@ -361,10 +364,20 @@ class ZoroVoiceService : Service() {
 
     private fun buildNotification(): Notification {
 
+        // ZORO 2.1: acik ekrani one getirir, ikinci bir ekran acmaz
+        // (iki ekran ayni komutu iki kez sunucuya gonderiyordu).
         val openIntent = Intent(
             this,
             MainActivity::class.java
-        )
+        ).apply {
+            action = Intent.ACTION_MAIN
+            addCategory(Intent.CATEGORY_LAUNCHER)
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+            )
+        }
 
         val openPendingIntent =
             PendingIntent.getActivity(
@@ -931,6 +944,7 @@ class ZoroVoiceService : Service() {
 
         if (command.isNotBlank()) {
 
+            followUpListens = 0
             sendVoiceCommand(command)
 
             publishStatus(STATUS_STARTING)
@@ -962,6 +976,8 @@ class ZoroVoiceService : Service() {
     // ==========================================
 
     private fun speakWakeReply() {
+
+        followUpListens = 0
 
         handler.removeCallbacks(
             restartListening
@@ -1053,7 +1069,12 @@ class ZoroVoiceService : Service() {
 
         val engine = speaker
 
-        if (text.isBlank() || engine == null) {
+        // Dinleme durdurulduysa cevap da isi de (orn. arama) birakilir.
+        if (!running || engine == null) {
+            return
+        }
+
+        if (text.isBlank()) {
             after?.invoke()
             return
         }
@@ -1083,7 +1104,9 @@ class ZoroVoiceService : Service() {
 
         // after() yeni bir konusma baslattiysa dinleme onun bitisini bekler.
         if (afterReply.isEmpty()) {
-            resumeListeningAfterSpeech(listenForReply = completed && entry.second)
+            val listen = completed && entry.second && followUpListens < 2
+            followUpListens = if (listen) followUpListens + 1 else 0
+            resumeListeningAfterSpeech(listenForReply = listen)
         }
     }
 

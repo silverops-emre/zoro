@@ -12,7 +12,8 @@ import org.json.JSONObject
 // ZORO 2.1: SON ARAMALAR
 // ==========================================
 // "Beni kim aradi", "onu geri ara" icin son 48 saatin en fazla 10 aramasi
-// sunucuya gider. Ayar kapaliysa ya da izin yoksa hic gonderilmez.
+// sunucuya gider: yalnizca soz aramalarla ilgiliyse ("ara", "cevapsiz",
+// "telefon"...) ya da sabah ozetinde. Ayar kapaliysa ya da izin yoksa hic.
 
 object ZoroCallLog {
 
@@ -24,10 +25,19 @@ object ZoroCallLog {
         context.checkSelfPermission(Manifest.permission.READ_CALL_LOG) ==
                 PackageManager.PERMISSION_GRANTED
 
-    // null = ayar kapali ya da izin yok (sunucu "goremiyorum" der).
-    fun recentCalls(context: Context): JSONArray? {
+    private val callTopic = Regex(
+        "(?<!\\p{L})(ara|cevapsız|cevapsiz|çağrı|cagri|telefon|geri dön|geri don)",
+        RegexOption.IGNORE_CASE
+    )
+
+    // null = gonderilmez (ayar kapali, izin yok ya da soz aramalarla ilgili degil).
+    fun recentCalls(context: Context, message: String, briefing: Boolean = false): JSONArray? {
 
         if (!ZoroPrefs.callLog(context) || !canRead(context)) {
+            return null
+        }
+
+        if (!briefing && !callTopic.containsMatchIn(message.lowercase(java.util.Locale.forLanguageTag("tr-TR")))) {
             return null
         }
 
@@ -79,13 +89,14 @@ object ZoroCallLog {
     }
 
     // Sunucu "geri ara" icin numara gonderdiginde: numara gercekten son
-    // aramalarda var mi? Varsa dogrudan aranir, yoksa ceviricide acilir.
-    fun isRecentNumber(context: Context, number: String): Boolean {
+    // aramalarda var mi? Varsa telefonun kaydindaki numara doner (sunucunun
+    // gonderdigi metin degil). Yoksa null.
+    fun recentNumber(context: Context, number: String): String? {
 
         val wanted = number.filter { it.isDigit() }.takeLast(10)
 
         if (wanted.length < 3 || !canRead(context)) {
-            return false
+            return null
         }
 
         return try {
@@ -94,17 +105,44 @@ object ZoroCallLog {
                 arrayOf(CallLog.Calls.NUMBER),
                 "${CallLog.Calls.DATE} >= ?",
                 arrayOf((System.currentTimeMillis() - WINDOW_MS).toString()),
-                null
+                "${CallLog.Calls.DATE} DESC"
             )?.use { cursor ->
-                var found = false
-                while (!found && cursor.moveToNext()) {
-                    found = cursor.getString(0).orEmpty()
-                        .filter { it.isDigit() }.takeLast(10) == wanted
+                var found: String? = null
+                while (found == null && cursor.moveToNext()) {
+                    val logged = cursor.getString(0).orEmpty()
+                    if (logged.filter { it.isDigit() }.takeLast(10) == wanted) found = logged
                 }
                 found
-            } == true
+            }
         } catch (error: Exception) {
             Log.e(TAG, "Arama kaydi kontrol edilemedi", error)
+            null
+        }
+    }
+
+    // Numara rehberde kayitli mi? Kayitli degilse (orn. tek calip kapanan
+    // ucretli hat) geri arama dogrudan yapilmaz, ceviricide acilir.
+    fun isContact(context: Context, number: String): Boolean {
+
+        if (context.checkSelfPermission(Manifest.permission.READ_CONTACTS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return false
+        }
+
+        return try {
+            context.contentResolver.query(
+                android.net.Uri.withAppendedPath(
+                    android.provider.ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+                    android.net.Uri.encode(number)
+                ),
+                arrayOf(android.provider.ContactsContract.PhoneLookup._ID),
+                null,
+                null,
+                null
+            )?.use { it.moveToFirst() } == true
+        } catch (error: Exception) {
+            Log.e(TAG, "Rehber kontrol edilemedi", error)
             false
         }
     }

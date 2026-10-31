@@ -213,8 +213,10 @@ def yes_no(message: str) -> str | None:
 def _clean_reply(text: str) -> str:
     """Make the reply safe for text-to-speech."""
     # Web search citations: "([site.com](https://...))", "[başlık](https://...)", bare URLs.
-    text = re.sub(r"\(\s*\[[^\]]*\]\(\s*https?://[^)]*\)\s*\)", "", text or "")
-    text = re.sub(r"\[([^\]]*)\]\(\s*https?://[^)]*\)", r"\1", text)
+    # URLs may hold one level of parentheses (Wikipedia), several links may share one pair.
+    url = r"https?://(?:[^()\s]|\([^()\s]*\))*"
+    text = re.sub(r"\(\s*(?:\[[^\]]*\]\(\s*" + url + r"\)\s*,?\s*)+\)", "", text or "")
+    text = re.sub(r"\[([^\]]*)\]\(\s*" + url + r"\)", r"\1", text)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"\s+([.,;:!?])", r"\1", text)
     text = re.sub(r"[*#`_]+", "", text)

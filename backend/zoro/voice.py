@@ -18,6 +18,16 @@ VOICE_INSTRUCTIONS = (
 )
 
 
+# Measured 2026-10-31: 204 audio tokens for 8.0 s of speech.
+AUDIO_TOKENS_PER_SECOND = 25.5
+
+
+def estimated_usage(text: str, pcm_bytes: int) -> dict[str, int]:
+    """Billing estimate for a stream that ended before OpenAI reported usage."""
+    seconds = pcm_bytes / 2 / SAMPLE_RATE
+    return {"input_tokens": max(1, len(text) // 3), "output_tokens": int(seconds * AUDIO_TOKENS_PER_SECOND)}
+
+
 class VoiceUnavailable(Exception):
     """The speech model could not be reached or returned an error."""
 

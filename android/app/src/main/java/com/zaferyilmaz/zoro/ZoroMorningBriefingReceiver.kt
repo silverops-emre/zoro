@@ -28,6 +28,202 @@ class ZoroMorningBriefingReceiver : BroadcastReceiver() {
         private const val TAG = "ZORO_MORNING"
         private const val CHANNEL_ID = "zoro_morning_briefing"
         private const val NOTIFICATION_ID = 100010
+
+        // ZORO 2.1: ses servisi de kullanir (sunucuya ulasilamazsa yerel ozet).
+        // ==========================================
+        // GUNLUK PROGRAMI HAZIRLA
+        // ==========================================
+
+        fun buildMorningBriefing(
+            context: Context
+        ): String {
+
+            val zone = TimeZone.getTimeZone(
+                "Europe/Istanbul"
+            )
+
+            val turkish = Locale.forLanguageTag(
+                "tr-TR"
+            )
+
+            val start = Calendar.getInstance(zone).apply {
+                set(Calendar.HOUR_OF_DAY, 0)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }
+
+            val end = Calendar.getInstance(zone).apply {
+                timeInMillis = start.timeInMillis
+                add(Calendar.DAY_OF_YEAR, 1)
+            }
+
+            val manager = CalendarManager(context)
+
+            // Samsung/Google izni olmasa da
+            // Zoro'nun kendi takvimi okunabilir.
+            val events = manager.getAllEvents(
+                start.timeInMillis,
+                end.timeInMillis
+            ).sortedBy {
+                it.startMillis
+            }
+
+            val message = StringBuilder(
+                "Zafer Bey, günaydın. "
+            )
+
+            if (events.isEmpty()) {
+                message.append(
+                    "Bugün takviminizde kayıtlı " +
+                            "bir randevu görünmüyor. "
+                )
+            } else {
+                message.append(
+                    "Bugün ${events.size} " +
+                            "takvim etkinliğiniz bulunuyor. "
+                )
+
+                val timeFormat = SimpleDateFormat(
+                    "HH:mm",
+                    turkish
+                ).apply {
+                    timeZone = zone
+                }
+
+                events.take(10).forEach { event ->
+
+                    if (event.allDay) {
+                        message.append(
+                            "Tüm gün: ${event.title}. "
+                        )
+                    } else {
+                        val eventTime = timeFormat.format(
+                            Date(event.startMillis)
+                        )
+
+                        message.append(
+                            "Saat $eventTime, " +
+                                    "${event.title}. "
+                        )
+                    }
+                }
+
+                if (events.size > 10) {
+                    message.append(
+                        "Diğer etkinliklerinizi " +
+                                "Takvimim bölümünden " +
+                                "görebilirsiniz. "
+                    )
+                }
+            }
+
+            // Hatirlatma kayitlarini say.
+            // Bunlarin tamamlama durumu bu
+            // ekranda dogrulanmadigi icin
+            // "bekleyen gorev" demiyoruz.
+            try {
+                val reminders =
+                    ReminderStore.getAllReminders(
+                        context
+                    )
+
+                if (reminders.isNotEmpty()) {
+                    message.append(
+                        "Ayrıca kayıtlı " +
+                                "${reminders.size} görev " +
+                                "hatırlatmanız bulunuyor. "
+                    )
+                }
+
+            } catch (error: Exception) {
+                Log.w(
+                    TAG,
+                    "Gorev hatirlatmalari okunamadi",
+                    error
+                )
+            }
+
+            message.append(
+                "Güzel ve verimli bir gün dilerim."
+            )
+
+            return message.toString()
+        }
+
+        // ==========================================
+        // TELEFON BILDIRIMI
+        // ==========================================
+
+        fun showNotification(
+            context: Context,
+            message: String
+        ) {
+            try {
+                if (
+                    Build.VERSION.SDK_INT >= 33 &&
+                    context.checkSelfPermission(
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    return
+                }
+
+                val manager = context.getSystemService(
+                    NotificationManager::class.java
+                )
+
+                if (Build.VERSION.SDK_INT >= 26) {
+                    val channel = NotificationChannel(
+                        CHANNEL_ID,
+                        "Zoro Sabah Brifingi",
+                        NotificationManager.IMPORTANCE_HIGH
+                    )
+
+                    manager.createNotificationChannel(
+                        channel
+                    )
+                }
+
+                val builder =
+                    if (Build.VERSION.SDK_INT >= 26) {
+                        Notification.Builder(
+                            context,
+                            CHANNEL_ID
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        Notification.Builder(context)
+                    }
+
+                val notification = builder
+                    .setSmallIcon(
+                        android.R.drawable.ic_popup_reminder
+                    )
+                    .setContentTitle(
+                        "Zoro Günlük Sabah Brifingi"
+                    )
+                    .setContentText(message)
+                    .setStyle(
+                        Notification.BigTextStyle()
+                            .bigText(message)
+                    )
+                    .setAutoCancel(true)
+                    .build()
+
+                manager.notify(
+                    NOTIFICATION_ID,
+                    notification
+                )
+
+            } catch (error: Exception) {
+                Log.e(
+                    TAG,
+                    "Sabah bildirimi hatasi",
+                    error
+                )
+            }
+        }
     }
 
     override fun onReceive(
@@ -78,201 +274,6 @@ class ZoroMorningBriefingReceiver : BroadcastReceiver() {
                 pendingResult.finish()
             }
         }.start()
-    }
-
-    // ==========================================
-    // GUNLUK PROGRAMI HAZIRLA
-    // ==========================================
-
-    private fun buildMorningBriefing(
-        context: Context
-    ): String {
-
-        val zone = TimeZone.getTimeZone(
-            "Europe/Istanbul"
-        )
-
-        val turkish = Locale.forLanguageTag(
-            "tr-TR"
-        )
-
-        val start = Calendar.getInstance(zone).apply {
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }
-
-        val end = Calendar.getInstance(zone).apply {
-            timeInMillis = start.timeInMillis
-            add(Calendar.DAY_OF_YEAR, 1)
-        }
-
-        val manager = CalendarManager(context)
-
-        // Samsung/Google izni olmasa da
-        // Zoro'nun kendi takvimi okunabilir.
-        val events = manager.getAllEvents(
-            start.timeInMillis,
-            end.timeInMillis
-        ).sortedBy {
-            it.startMillis
-        }
-
-        val message = StringBuilder(
-            "Zafer Bey, günaydın. "
-        )
-
-        if (events.isEmpty()) {
-            message.append(
-                "Bugün takviminizde kayıtlı " +
-                        "bir randevu görünmüyor. "
-            )
-        } else {
-            message.append(
-                "Bugün ${events.size} " +
-                        "takvim etkinliğiniz bulunuyor. "
-            )
-
-            val timeFormat = SimpleDateFormat(
-                "HH:mm",
-                turkish
-            ).apply {
-                timeZone = zone
-            }
-
-            events.take(10).forEach { event ->
-
-                if (event.allDay) {
-                    message.append(
-                        "Tüm gün: ${event.title}. "
-                    )
-                } else {
-                    val eventTime = timeFormat.format(
-                        Date(event.startMillis)
-                    )
-
-                    message.append(
-                        "Saat $eventTime, " +
-                                "${event.title}. "
-                    )
-                }
-            }
-
-            if (events.size > 10) {
-                message.append(
-                    "Diğer etkinliklerinizi " +
-                            "Takvimim bölümünden " +
-                            "görebilirsiniz. "
-                )
-            }
-        }
-
-        // Hatirlatma kayitlarini say.
-        // Bunlarin tamamlama durumu bu
-        // ekranda dogrulanmadigi icin
-        // "bekleyen gorev" demiyoruz.
-        try {
-            val reminders =
-                ReminderStore.getAllReminders(
-                    context
-                )
-
-            if (reminders.isNotEmpty()) {
-                message.append(
-                    "Ayrıca kayıtlı " +
-                            "${reminders.size} görev " +
-                            "hatırlatmanız bulunuyor. "
-                )
-            }
-
-        } catch (error: Exception) {
-            Log.w(
-                TAG,
-                "Gorev hatirlatmalari okunamadi",
-                error
-            )
-        }
-
-        message.append(
-            "Güzel ve verimli bir gün dilerim."
-        )
-
-        return message.toString()
-    }
-
-    // ==========================================
-    // TELEFON BILDIRIMI
-    // ==========================================
-
-    private fun showNotification(
-        context: Context,
-        message: String
-    ) {
-        try {
-            if (
-                Build.VERSION.SDK_INT >= 33 &&
-                context.checkSelfPermission(
-                    Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                return
-            }
-
-            val manager = context.getSystemService(
-                NotificationManager::class.java
-            )
-
-            if (Build.VERSION.SDK_INT >= 26) {
-                val channel = NotificationChannel(
-                    CHANNEL_ID,
-                    "Zoro Sabah Brifingi",
-                    NotificationManager.IMPORTANCE_HIGH
-                )
-
-                manager.createNotificationChannel(
-                    channel
-                )
-            }
-
-            val builder =
-                if (Build.VERSION.SDK_INT >= 26) {
-                    Notification.Builder(
-                        context,
-                        CHANNEL_ID
-                    )
-                } else {
-                    @Suppress("DEPRECATION")
-                    Notification.Builder(context)
-                }
-
-            val notification = builder
-                .setSmallIcon(
-                    android.R.drawable.ic_popup_reminder
-                )
-                .setContentTitle(
-                    "Zoro Günlük Sabah Brifingi"
-                )
-                .setContentText(message)
-                .setStyle(
-                    Notification.BigTextStyle()
-                        .bigText(message)
-                )
-                .setAutoCancel(true)
-                .build()
-
-            manager.notify(
-                NOTIFICATION_ID,
-                notification
-            )
-
-        } catch (error: Exception) {
-            Log.e(
-                TAG,
-                "Sabah bildirimi hatasi",
-                error
-            )
-        }
     }
 
     // ==========================================

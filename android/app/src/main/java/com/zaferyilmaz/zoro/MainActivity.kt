@@ -114,8 +114,11 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
 
     companion object {
         // ZORO 2.1: ekran yasiyorsa sesli komut ekrana gider, yoksa servis isler.
-        @Volatile
-        var isAlive = false
+        // Sayac: ust uste iki ekran olursa biri kapaninca digeri hala canli.
+        private val aliveCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+        val isAlive: Boolean
+            get() = aliveCount.get() > 0
     }
 
     // ZORO 2.1: dogal ses ya da telefonun en iyi Turkce sesi.
@@ -278,7 +281,7 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
     ) {
 
         super.onCreate(savedInstanceState)
-        isAlive = true
+        aliveCount.incrementAndGet()
         // ZORO_MORNING_BRIEFING_START
 // Her sabah saat 10.00 icin brifing alarmi kur.
         ZoroMorningBriefingScheduler.scheduleNext(applicationContext)
@@ -329,7 +332,7 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                     http = httpClient,
                     onBack = { settingsScreenOpen = false },
                     previewVoice = { voice, onError ->
-                        speaker?.preview(voice, "ZORO_PREVIEW_" + System.nanoTime(), onError)
+                        previewVoice(voice, onError)
                     },
                     requestPermission = { permissions ->
                         requestPermissions(permissions.toTypedArray(), 2002)
@@ -439,11 +442,18 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
         val wanted = mutableListOf(
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.CALL_PHONE,
-            // ZORO 2.1: Google Takvim'i gorme/degistirme ve "beni kim aradi".
-            Manifest.permission.READ_CALENDAR,
-            Manifest.permission.WRITE_CALENDAR,
-            Manifest.permission.READ_CALL_LOG
+            // ZORO 2.1: Google Takvim'i gormek icin.
+            Manifest.permission.READ_CALENDAR
         )
+
+        // Ayarlarda kapatilan ozelligin izni sorulmaz.
+        if (ZoroPrefs.calendarWrite(applicationContext)) {
+            wanted.add(Manifest.permission.WRITE_CALENDAR)
+        }
+
+        if (ZoroPrefs.callLog(applicationContext)) {
+            wanted.add(Manifest.permission.READ_CALL_LOG)
+        }
 
         if (Build.VERSION.SDK_INT >= 37) {
             wanted.add(Manifest.permission.ACCESS_LOCAL_NETWORK)
@@ -537,6 +547,23 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
         engine.speak(cleanText, utteranceId)
     }
 
+    // Ayarlardaki "Dinle": ornek cumle "Zoro" kelimesini icerir, arka plandaki
+    // dinleme onu komut sanmasin diye mikrofon susturulur.
+    private fun previewVoice(voice: String, onError: (String) -> Unit) {
+
+        val engine = speaker ?: return
+        val id = "ZORO_PREVIEW_" + System.nanoTime()
+
+        currentUtteranceId = id
+
+        if (ZoroVoiceService.isActive) {
+            servicePausedForSpeech = true
+            ZoroVoiceService.pauseForSpeech()
+        }
+
+        engine.preview(voice, id, onError)
+    }
+
     // ==========================================
     // ZORO 2.0: KONUS, SONRA YAP
     // ==========================================
@@ -579,7 +606,8 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
             return
         }
 
-        val listen = entry?.second == true && followUpListens < 2
+        // Yarida kesilen soru (geri tusu, yeni cevap) dinleme penceresi acmaz.
+        val listen = completed && entry?.second == true && followUpListens < 2
         followUpListens = if (listen) followUpListens + 1 else 0
 
         if (servicePausedForSpeech) {
@@ -1430,7 +1458,7 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
             message = message,
             calendar = calendarContext,
             clientNote = note,
-            recentCalls = ZoroCallLog.recentCalls(applicationContext)
+            recentCalls = ZoroCallLog.recentCalls(applicationContext, message)
         )
             .toString()
             .toRequestBody(
@@ -2093,7 +2121,7 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
             commandReceiverRegistered = false
         }
 
-        isAlive = false
+        aliveCount.decrementAndGet()
 
         speaker?.shutdown()
         speaker = null

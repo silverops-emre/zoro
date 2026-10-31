@@ -138,6 +138,31 @@ class Store:
                 (key, value),
             )
 
+    def update_json_meta(self, key: str, update: Any) -> dict[str, Any]:
+        """Read-modify-write of a JSON object in meta, atomic across workers."""
+        conn = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            try:
+                current = json.loads(row[0]) if row else {}
+            except ValueError:
+                current = {}
+            new = update(current if isinstance(current, dict) else {})
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, json.dumps(new, ensure_ascii=False)),
+            )
+            conn.execute("COMMIT")
+            return new
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
     # ------------------------------------------------------------ messages
     def add_message(self, role: str, content: str, actions: list | None = None) -> None:
         with self.connect() as conn:

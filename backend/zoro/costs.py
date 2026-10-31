@@ -122,7 +122,6 @@ def summary(store: Store, settings: dict[str, Any], model: str, tts_model: str, 
     if rows:
         first = datetime.fromisoformat(rows[0]["created_at"])
         elapsed = (now - first).total_seconds() / 86400
-    span = max(1.0, elapsed)
     remaining_days = max(0.0, days_in_month - (now.day - 1) - now.hour / 24)
 
     measured_asks = asks_per_day(store, now)
@@ -133,12 +132,17 @@ def summary(store: Store, settings: dict[str, Any], model: str, tts_model: str, 
                   if text_price is not None else pricing.WEB_SEARCH_PER_CALL)
     per_tts = pricing.speech_cost(tts_model, *TTS_REPLY_TOKENS)
 
+    budget = float(settings.get("monthly_budget_usd") or 0)
+    spent = sum(r["cost_usd"] or 0.0 for r in rows)
+    budget_reached = budget > 0 and spent >= budget
     enabled = {
         "beyin": True,
         "web_arama": bool(settings.get("web_search")),
         "dogal_ses": bool(settings.get("natural_voice")),
         "sabah_ozeti": bool(settings.get("briefing_enabled")),
     }
+    # What will actually run for the rest of the month: paid extras stop at the budget.
+    running = {**enabled, **({"web_arama": False, "dogal_ses": False} if budget_reached else {})}
 
     features = []
     total = 0.0
@@ -161,9 +165,15 @@ def summary(store: Store, settings: dict[str, Any], model: str, tts_model: str, 
 
         daily_uses = {"beyin": daily_asks, "web_arama": ASSUMED_SEARCHES_PER_DAY,
                       "dogal_ses": daily_asks, "sabah_ozeti": 1}[key]
-        if uses and enabled[key]:
+        if uses and running[key]:
+            # Rate since this feature's own first use this month (it may have been switched on mid-month).
+            first_use = datetime.fromisoformat(mine[0]["created_at"])
+            span = max(1.0, (now - first_use).total_seconds() / 86400)
             projected = cost + cost / span * remaining_days
             basis = "olculen"
+        elif not running[key]:
+            projected = cost  # switched off (or stopped by the budget): no further spend
+            basis = "olculen" if uses else "veri_yok"
         elif per_use is not None:
             projected = cost + per_use * daily_uses * remaining_days
             basis = "tahmin"
@@ -173,8 +183,8 @@ def summary(store: Store, settings: dict[str, Any], model: str, tts_model: str, 
         if_on_monthly = round(per_use * daily_uses * 30, 2) if per_use is not None else None
 
         total += cost
-        if enabled[key] and projected is not None:
-            total_projected += projected
+        # Money already spent always counts, even for a feature that is now off.
+        total_projected += projected if projected is not None else cost
         features.append({
             "key": key,
             "label": label,
@@ -182,13 +192,12 @@ def summary(store: Store, settings: dict[str, Any], model: str, tts_model: str, 
             "cost_usd": round(cost, 4),
             "uses": uses,
             "per_use_usd": per_use,
-            "projected_usd": round(projected, 2) if projected is not None and enabled[key] else None,
+            "projected_usd": round(projected, 2) if projected is not None and running[key] else None,
             "monthly_if_on_usd": if_on_monthly,
             "assumed_daily_uses": daily_uses,
             "basis": basis,
         })
 
-    budget = float(settings.get("monthly_budget_usd") or 0)
     rate = usd_try_rate(store, now, rate_fetch)
     return {
         "month": month,
@@ -198,7 +207,7 @@ def summary(store: Store, settings: dict[str, Any], model: str, tts_model: str, 
         "total_usd": round(total, 4),
         "projected_usd": round(total_projected, 2),
         "budget_usd": budget,
-        "budget_reached": budget > 0 and total >= budget,
+        "budget_reached": budget_reached,
         "usd_try": rate,
         "asks_per_day": measured_asks,
         "asks_per_day_assumed": measured_asks is None,

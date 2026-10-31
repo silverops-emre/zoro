@@ -608,7 +608,9 @@ class CalendarManager(
                 CalendarContract.Instances.CALENDAR_DISPLAY_NAME,
                 CalendarContract.Instances.CALENDAR_ACCESS_LEVEL,
                 CalendarContract.Instances.RRULE,
-                CalendarContract.Instances.ORIGINAL_ID
+                CalendarContract.Instances.ORIGINAL_ID,
+                CalendarContract.Instances.IS_ORGANIZER,
+                CalendarContract.Instances.GUESTS_CAN_MODIFY
             )
 
             val mayWrite =
@@ -696,10 +698,18 @@ class CalendarManager(
                         cursor.getInt(allDayIndex) != 0
 
                     val writable = mayWrite && !isAllDay &&
-                            cursor.getInt(projection.size - 3) >=
+                            cursor.getInt(cursor.getColumnIndexOrThrow(
+                                CalendarContract.Instances.CALENDAR_ACCESS_LEVEL)) >=
                             CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR &&
-                            cursor.getString(projection.size - 2).isNullOrBlank() &&
-                            cursor.isNull(projection.size - 1)
+                            cursor.getString(cursor.getColumnIndexOrThrow(
+                                CalendarContract.Instances.RRULE)).isNullOrBlank() &&
+                            cursor.isNull(cursor.getColumnIndexOrThrow(
+                                CalendarContract.Instances.ORIGINAL_ID)) &&
+                            // Davetli olunan toplantiyi yalnizca duzenleyen tasiyabilir.
+                            (cursor.getInt(cursor.getColumnIndexOrThrow(
+                                CalendarContract.Instances.IS_ORGANIZER)) == 1 ||
+                                    cursor.getInt(cursor.getColumnIndexOrThrow(
+                                        CalendarContract.Instances.GUESTS_CAN_MODIFY)) == 1)
 
                     result.add(
                         ZoroCalendarEvent(
@@ -761,7 +771,9 @@ class CalendarManager(
                     CalendarContract.Events.RRULE,
                     CalendarContract.Events.ORIGINAL_ID,
                     CalendarContract.Events.ALL_DAY,
-                    CalendarContract.Events.CALENDAR_ACCESS_LEVEL
+                    CalendarContract.Events.CALENDAR_ACCESS_LEVEL,
+                    CalendarContract.Events.IS_ORGANIZER,
+                    CalendarContract.Events.GUESTS_CAN_MODIFY
                 ),
                 null,
                 null,
@@ -771,7 +783,8 @@ class CalendarManager(
                         cursor.getString(0).isNullOrBlank() &&
                         cursor.isNull(1) &&
                         cursor.getInt(2) == 0 &&
-                        cursor.getInt(3) >= CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR
+                        cursor.getInt(3) >= CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR &&
+                        (cursor.getInt(4) == 1 || cursor.getInt(5) == 1)
             } == true
         } catch (error: Exception) {
             Log.e(TAG, "Telefon takvimi etkinligi okunamadi", error)
@@ -779,12 +792,13 @@ class CalendarManager(
         }
     }
 
+    // title/location null: degismez (sunucudaki kopya kisaltilmis olabilir).
     fun updateAndroidEvent(
         key: String,
-        title: String,
+        title: String?,
         startMillis: Long,
         endMillis: Long,
-        location: String
+        location: String?
     ): Boolean {
 
         val eventId = androidEventId(key) ?: return false
@@ -795,10 +809,10 @@ class CalendarManager(
 
         return try {
             val values = android.content.ContentValues().apply {
-                put(CalendarContract.Events.TITLE, title)
+                if (!title.isNullOrBlank()) put(CalendarContract.Events.TITLE, title)
                 put(CalendarContract.Events.DTSTART, startMillis)
                 put(CalendarContract.Events.DTEND, endMillis)
-                put(CalendarContract.Events.EVENT_LOCATION, location)
+                if (location != null) put(CalendarContract.Events.EVENT_LOCATION, location)
             }
             context.contentResolver.update(
                 ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),

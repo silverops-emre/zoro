@@ -6,6 +6,7 @@ import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
@@ -19,6 +20,7 @@ import org.json.JSONObject
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 // ==========================================
 // ZORO 2.1: KONUSMA MOTORU
@@ -27,6 +29,8 @@ import java.util.concurrent.TimeUnit
 // Kapaliysa, internet yoksa, butce dolduysa ya da ses gelmezse telefonun
 // en kaliteli Turkce sesi okur. Her konusma tam bir kez biter:
 // onFinished(id, completed); yeni konusma eskisini keser (completed=false).
+// Ayni kimlikle (orn. "ZORO_ERROR") ust uste gelen konusmada eskisi
+// sessizce birakilir, bitisi bildirilmez: yenisinin bitisi beklenir.
 
 class ZoroSpeaker(
     context: Context,
@@ -68,11 +72,13 @@ class ZoroSpeaker(
     private var tts: TextToSpeech? = null
     private var ttsReady = false
 
-    // Bitmemis konusmalar. remove() basarili olan tek cagri bitisi bildirir.
-    private val open = ConcurrentHashMap.newKeySet<String>()
+    // Her konusmanin ic kimligi ("id#sira") -> disariya bildirilecek id.
+    // remove() basarili olan tek cagri bitisi bildirir.
+    private val open = ConcurrentHashMap<String, String>()
+    private val counter = AtomicLong()
 
     @Volatile
-    private var currentId: String? = null
+    private var current: String? = null
 
     init {
         tts = TextToSpeech(appContext) { status ->
@@ -109,41 +115,53 @@ class ZoroSpeaker(
         }
     }
 
-    private fun finish(id: String, completed: Boolean) {
-        if (open.remove(id)) {
-            main.post { onFinished(id, completed) }
+    private fun finish(token: String, completed: Boolean) {
+        val id = open.remove(token) ?: return
+        main.post { onFinished(id, completed) }
+    }
+
+    // Yeni konusma: oncekini keser. Farkli id ise onun bitisi (kesildi) bildirilir.
+    private fun begin(id: String): String {
+
+        val token = id + "#" + counter.incrementAndGet()
+        val previous = current
+
+        current = token
+        open[token] = id
+
+        if (previous != null) {
+            tts?.stop()
+            val previousId = open.remove(previous)
+            if (previousId != null && previousId != id) {
+                main.post { onFinished(previousId, false) }
+            }
         }
+
+        return token
     }
 
     // Ana is parcaciginda cagrilir.
     fun speak(text: String, id: String) {
 
-        val previous = currentId
-        currentId = id
-        open.add(id)
-
-        if (previous != null && previous != id) {
-            tts?.stop()
-            finish(previous, false)
-        }
+        val token = begin(id)
 
         if (text.isBlank()) {
-            finish(id, true)
+            finish(token, true)
             return
         }
 
         if (ZoroPrefs.naturalVoice(appContext)) {
-            Thread({ playNatural(JSONObject().put("text", text), text, id, null) }, "zoro-voice").start()
+            Thread({ playNatural(JSONObject().put("text", text), text, token, null) }, "zoro-voice").start()
         } else {
-            speakDevice(text, id)
+            speakDevice(text, token)
         }
     }
 
     fun stop() {
-        val id = currentId ?: return
-        currentId = null
+        val token = current ?: return
+        current = null
         tts?.stop()
-        finish(id, false)
+        finish(token, false)
     }
 
     fun shutdown() {
@@ -155,21 +173,21 @@ class ZoroSpeaker(
         tts = null
     }
 
-    private fun speakDevice(text: String, id: String) {
+    private fun speakDevice(text: String, token: String) {
 
         main.post {
             val engine = tts
-            if (currentId != id) {
-                finish(id, false)
+            if (current != token) {
+                finish(token, false)
                 return@post
             }
             if (!ttsReady || engine == null) {
-                finish(id, true)
+                finish(token, true)
                 return@post
             }
-            val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+            val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, token)
             if (result != TextToSpeech.SUCCESS) {
-                finish(id, true)
+                finish(token, true)
             }
         }
     }
@@ -178,19 +196,46 @@ class ZoroSpeaker(
     // DOGAL SES (sunucu /tts, 24 kHz 16-bit mono PCM akisi)
     // ==========================================
 
+    private class Focus(private val audio: AudioManager, attributes: AudioAttributes) {
+
+        private val request: AudioFocusRequest? =
+            if (Build.VERSION.SDK_INT >= 26)
+                AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(attributes)
+                    .build()
+            else null
+
+        fun take() {
+            if (Build.VERSION.SDK_INT >= 26) {
+                audio.requestAudioFocus(request!!)
+            } else {
+                @Suppress("DEPRECATION")
+                audio.requestAudioFocus(null, AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+            }
+        }
+
+        fun release() {
+            if (Build.VERSION.SDK_INT >= 26) {
+                audio.abandonAudioFocusRequest(request!!)
+            } else {
+                @Suppress("DEPRECATION")
+                audio.abandonAudioFocus(null)
+            }
+        }
+    }
+
     // onHttpError null: sorun olursa telefonun sesi okur. Dolu: sorun bildirilir, okunmaz.
-    private fun playNatural(payload: JSONObject, text: String, id: String, onHttpError: ((Int) -> Unit)?) {
+    private fun playNatural(payload: JSONObject, text: String, token: String, onHttpError: ((Int) -> Unit)?) {
 
         var track: AudioTrack? = null
         var framesWritten = 0L
-        val audio = appContext.getSystemService(AudioManager::class.java)
         val attributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
-        val focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-            .setAudioAttributes(attributes)
-            .build()
+        val focus = Focus(appContext.getSystemService(AudioManager::class.java), attributes)
+        var focused = false
 
         try {
             val body = payload.toString()
@@ -203,10 +248,10 @@ class ZoroSpeaker(
                     // 409 kapali, 402 butce doldu, 502 ses modeli yok: telefonun sesi okur.
                     Log.w(TAG, "Dogal ses yok (${response.code})")
                     if (onHttpError != null) {
-                        finish(id, false)
+                        finish(token, false)
                         onHttpError(response.code)
                     } else {
-                        speakDevice(text, id)
+                        speakDevice(text, token)
                     }
                     return
                 }
@@ -214,7 +259,7 @@ class ZoroSpeaker(
                 val minBuffer = AudioTrack.getMinBufferSize(
                     SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
                 )
-                track = AudioTrack.Builder()
+                val output = AudioTrack.Builder()
                     .setAudioAttributes(attributes)
                     .setAudioFormat(
                         AudioFormat.Builder()
@@ -226,19 +271,19 @@ class ZoroSpeaker(
                     .setBufferSizeInBytes(maxOf(minBuffer * 2, SAMPLE_RATE))
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build()
+                track = output
 
                 val stream = response.body?.byteStream() ?: throw java.io.IOException("bos ses cevabi")
                 val buffer = ByteArray(8192)
                 var carry = -1  // 16-bit ornek iki okumaya bolunurse ilk bayt
 
-                while (currentId == id) {
-                    val read = stream.read(buffer, if (carry >= 0) 1 else 0,
-                        buffer.size - (if (carry >= 0) 1 else 0))
+                while (current == token) {
+                    val offset = if (carry >= 0) 1 else 0
+                    val read = stream.read(buffer, offset, buffer.size - offset)
                     if (read < 0) break
-                    var length = read
+                    var length = read + offset
                     if (carry >= 0) {
                         buffer[0] = carry.toByte()
-                        length += 1
                         carry = -1
                     }
                     if (length % 2 == 1) {
@@ -247,43 +292,51 @@ class ZoroSpeaker(
                     }
                     if (length == 0) continue
                     if (framesWritten == 0L) {
-                        audio.requestAudioFocus(focus)
-                        track!!.play()
+                        focus.take()
+                        focused = true
+                        output.play()
                     }
-                    track!!.write(buffer, 0, length)
-                    framesWritten += length / 2
+                    val written = output.write(buffer, 0, length)
+                    if (written < 0) throw java.io.IOException("AudioTrack yazma hatasi $written")
+                    framesWritten += written / 2
                 }
 
-                if (currentId != id) {
-                    finish(id, false)
+                if (current != token) {
+                    finish(token, false)
                     return
                 }
 
                 if (framesWritten == 0L) {
-                    if (onHttpError != null) finish(id, false) else speakDevice(text, id)
+                    if (onHttpError != null) finish(token, false) else speakDevice(text, token)
                     return
                 }
 
-                // Tampondaki son parcalar da calinsin.
-                val deadline = System.currentTimeMillis() + framesWritten * 1000 / SAMPLE_RATE + 2000
-                while (currentId == id && track!!.playbackHeadPosition < framesWritten &&
+                // Sona yarim saniye sessizlik: kisa cevaplar ve ag takilmasindan
+                // sonra kalan son parca da calma esigini gecsin.
+                val silence = ByteArray(SAMPLE_RATE)
+                output.write(silence, 0, silence.size)
+
+                // Kalan konusma kadar bekle (sessizlik dahil degil).
+                val remaining = (framesWritten - output.playbackHeadPosition).coerceAtLeast(0)
+                val deadline = System.currentTimeMillis() + remaining * 1000 / SAMPLE_RATE + 1500
+                while (current == token && output.playbackHeadPosition < framesWritten &&
                     System.currentTimeMillis() < deadline
                 ) {
                     Thread.sleep(40)
                 }
-                finish(id, currentId == id)
+                finish(token, current == token)
             }
 
         } catch (error: Exception) {
             Log.w(TAG, "Dogal ses hatasi", error)
             if (framesWritten == 0L && onHttpError != null) {
-                finish(id, false)
+                finish(token, false)
                 onHttpError(-1)
-            } else if (framesWritten == 0L && currentId == id) {
-                speakDevice(text, id)
+            } else if (framesWritten == 0L && current == token) {
+                speakDevice(text, token)
             } else {
                 // Cevabin bir kismi duyuldu: isi yarim birakma.
-                finish(id, currentId == id)
+                finish(token, current == token)
             }
         } finally {
             try {
@@ -292,7 +345,7 @@ class ZoroSpeaker(
                 track?.release()
             } catch (_: Exception) {
             }
-            audio.abandonAudioFocusRequest(focus)
+            if (focused) focus.release()
         }
     }
 
@@ -300,19 +353,12 @@ class ZoroSpeaker(
     // (dogal ses kapaliyken de; maliyeti bir cevap kadar).
     fun preview(voice: String, id: String, onError: (String) -> Unit) {
 
-        val previous = currentId
-        currentId = id
-        open.add(id)
-        if (previous != null && previous != id) {
-            tts?.stop()
-            finish(previous, false)
-        }
-
+        val token = begin(id)
         val text = "Merhaba Zafer Bey, ben Zoro. Sesim böyle olacak."
         val payload = JSONObject().put("text", text).put("preview", true).put("voice", voice)
 
         Thread({
-            playNatural(payload, text, id) { code ->
+            playNatural(payload, text, token) { code ->
                 main.post {
                     onError(
                         when (code) {

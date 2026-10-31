@@ -52,6 +52,8 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -88,6 +90,10 @@ private fun tl(value: Double, rate: Double?): String {
     else String.format(tr, " (≈ %.2f ₺)", lira)
 }
 
+// Turkce: virgul ondalik ayiraci ("2,5"). Nokta binlik ayiraci oldugu icin kabul edilmez.
+private fun budgetText(value: Double): String =
+    java.text.DecimalFormat("0.##", java.text.DecimalFormatSymbols(tr)).format(value)
+
 private fun hasPermission(context: Context, permission: String) =
     context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
@@ -109,6 +115,9 @@ fun ZoroSettingsScreen(
     var loading by remember { mutableStateOf(true) }
     var message by remember { mutableStateOf("") }
     var budgetInput by remember { mutableStateOf("") }
+
+    // Ayar kayitlari sirayla: eski cevap yenisinin uzerine yazmasin.
+    val saveLock = remember { Mutex() }
 
     // Izinler ve pil ayari ekran disinda degisebilir: saniyede bir yeniden okunur.
     var tick by remember { mutableIntStateOf(0) }
@@ -151,14 +160,14 @@ fun ZoroSettingsScreen(
             voices = if (list == null) emptyList() else (0 until list.length()).map { list.optString(it) }
             settings?.let {
                 ZoroPrefs.applyServerSettings(context, it)
-                budgetInput = String.format(tr, "%.0f", it.optDouble("monthly_budget_usd", 10.0))
+                budgetInput = budgetText(it.optDouble("monthly_budget_usd", 10.0))
             }
         }
         usage = result.second
     }
 
     fun save(change: JSONObject) {
-        scope.launch {
+        scope.launch { saveLock.withLock {
             message = ""
             val saved = withContext(Dispatchers.IO) {
                 try {
@@ -185,7 +194,7 @@ fun ZoroSettingsScreen(
                     try { get("/usage") } catch (_: Exception) { usage }
                 }
             }
-        }
+        } }
     }
 
     LaunchedEffect(Unit) { reload() }
@@ -262,7 +271,14 @@ fun ZoroSettingsScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
                         value = budgetInput,
-                        onValueChange = { budgetInput = it.filter { ch -> ch.isDigit() || ch == ',' || ch == '.' }.take(6) },
+                        onValueChange = { typed ->
+                            val digits = typed.filter { ch -> ch.isDigit() || ch == ',' }
+                            val comma = digits.indexOf(',')
+                            // En fazla bir virgul ve virgulden sonra iki hane.
+                            budgetInput = (if (comma < 0) digits
+                            else digits.substring(0, comma + 1) +
+                                    digits.substring(comma + 1).filter { it.isDigit() }.take(2)).take(7)
+                        },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.width(120.dp)
@@ -271,8 +287,8 @@ fun ZoroSettingsScreen(
                     Button(
                         onClick = {
                             val value = budgetInput.replace(',', '.').toDoubleOrNull()
-                            if (value == null || value < 0 || value > 1000) {
-                                message = "Bütçe 0 ile 1000 dolar arasında olmalı."
+                            if (value == null || value > 1000 || (value > 0 && value < 0.01)) {
+                                message = "Bütçe 0,01 ile 1000 dolar arasında olmalı (0 = sınırsız)."
                             } else {
                                 save(JSONObject().put("monthly_budget_usd", value))
                             }

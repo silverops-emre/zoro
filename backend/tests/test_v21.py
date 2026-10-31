@@ -372,3 +372,130 @@ def test_web_citations_are_not_read_aloud(h):
     reply = ask_v2(h, "haber var mı")["reply"]
     assert "http" not in reply and "](" not in reply and "kyivindependent" not in reply
     assert reply.startswith("Haber şu: Zelenskiy İstanbul'da.")
+
+
+# ------------------------------------------------- review r3 regressions
+
+def test_projection_keeps_spend_of_switched_off_features_and_uses_own_span(h):
+    t = now()
+    if t.day < 16:
+        pytest.skip("needs 15 days of this month behind us")
+    start = t.replace(day=1, hour=9, minute=0, second=0, microsecond=0)
+    for d in range(10):  # voice on days 1-10, then switched off
+        h.store.add_usage(created_at=start + timedelta(days=d), feature="dogal_ses", model="gpt-4o-mini-tts",
+                          cost_usd=0.3)
+    for d in range(t.day - 1):
+        h.store.add_usage(created_at=start + timedelta(days=d), feature="beyin", model="gpt-6-luna",
+                          cost_usd=0.01, turn_id=f"b{d}")
+    for i in range(20):  # web search switched on only today
+        h.store.add_usage(created_at=t - timedelta(minutes=30 - i), feature="web_arama", model="gpt-6-luna",
+                          searches=1, cost_usd=0.01)
+    h.client.put("/settings", json={"natural_voice": False, "web_search": True, "monthly_budget_usd": 0})
+    s = h.client.get("/usage").get_json()
+    assert s["projected_usd"] >= s["total_usd"]
+    web = next(f for f in s["features"] if f["key"] == "web_arama")
+    assert web["projected_usd"] > 0.2 * 1  # 20 searches in one day keep going, not spread over the month
+
+
+def test_budget_reached_stops_projection_of_paid_extras(h):
+    h.client.put("/settings", json={"natural_voice": True, "monthly_budget_usd": 1})
+    h.store.add_usage(created_at=now() - timedelta(hours=30), feature="dogal_ses", model="gpt-4o-mini-tts",
+                      cost_usd=1.2)
+    s = h.client.get("/usage").get_json()
+    voice = next(f for f in s["features"] if f["key"] == "dogal_ses")
+    assert s["budget_reached"] is True and voice["projected_usd"] is None
+    assert s["projected_usd"] == pytest.approx(1.2)
+
+
+def test_call_back_needs_the_users_own_request(h):
+    t = now()
+    ctx = calls_context({"name": "", "number": "08821234567", "type": "missed", "time_ms": ms(t.isoformat())})
+    h.script(metered(calls=[("call_contact", {"name": "", "phone_number": None, "call_ref": "c1", "say": "Arıyorum."})]),
+             metered("Takviminizde bir not var."))
+    out = ask_v2(h, "takvimde ne var", ctx)  # injected calendar text, no call request
+    assert out["actions"] == [] and h.tool_output(1)["ok"] is False
+
+
+def test_briefing_has_read_only_tools_and_cannot_call(h):
+    h.script(metered(calls=[("call_contact", {"name": "", "phone_number": None, "call_ref": "c1", "say": "x"})]),
+             metered("Günaydın."))
+    t = now()
+    r = h.client.post("/briefing", json={"client": V2_CLIENT, "context": {
+        **calls_context({"name": "", "number": "0882", "type": "missed", "time_ms": ms(t.isoformat())})}})
+    names = {tool.get("name") for tool in h.calls[0]["tools"]}
+    assert names <= {"get_weather", "get_exchange_rates", None}
+    assert r.get_json()["actions"] == [] and h.tool_output(1)["ok"] is False
+
+
+def test_briefing_ai_failure_is_503_without_rules_or_history(h):
+    h.script(RuntimeError("down"))
+    before = h.store.count_messages()
+    r = h.client.post("/briefing", json={"client": V2_CLIENT, "context": {"calendar": []}})
+    assert r.status_code == 503 and r.get_json()["error"] == "ai_unavailable"
+    assert h.store.count_messages() == before
+
+
+def test_briefing_leaves_open_confirmation_alone(h):
+    task = h.store.add_task("Su iç", at(1, 10), 0)
+    h.script(metered(calls=[call("delete_task", task_id=task["id"][:6])]))
+    assert ask_v2(h, "su içme görevini sil")["pending"] is not None
+    h.script(metered("Günaydın."))
+    h.client.post("/briefing", json={"client": V2_CLIENT, "context": {}})
+    assert h.store.active_pending(now()) is not None
+
+
+def test_tts_cut_short_is_still_metered(h):
+    h.client.put("/settings", json={"natural_voice": True})
+
+    class NoDone(FakeSpeech):
+        def create(self, **kwargs):
+            lines = [f"data: {json.dumps({'type': 'speech.audio.delta', 'audio': base64.b64encode(b'x' * 48000).decode()})}"]
+
+            class Ctx:
+                def __enter__(self_inner):
+                    return SimpleNamespace(iter_lines=lambda: iter(lines))
+
+                def __exit__(self_inner, *exc):
+                    return False
+            return Ctx()
+    with_speech(h, NoDone([]))
+    r = h.client.post("/tts", json={"text": "Merhaba Zafer Bey."})
+    assert len(r.data) == 48000
+    row = h.store.usage_rows(now().strftime("%Y-%m"))[0]
+    assert row["feature"] == "dogal_ses" and row["output_tokens"] == 25  # 1 s of audio
+    assert row["cost_usd"] > 0
+
+
+def test_citations_with_parentheses_and_groups(h):
+    from zoro.brain import _clean_reply
+    assert _clean_reply("Galatasaray 2-1 kazandı. ([tr.wikipedia.org](https://tr.wikipedia.org/wiki/Galatasaray_(futbol_takımı)?utm_source=openai))") \
+        == "Galatasaray 2-1 kazandı."
+    assert _clean_reply("Doğa Eczanesi açık. ([eczaneler.gen.tr](https://e.gen.tr/a), [h.org](https://h.org/b))") \
+        == "Doğa Eczanesi açık."
+
+
+def test_tiny_positive_budget_is_rejected_not_rounded_to_unlimited(h):
+    r = h.client.put("/settings", json={"monthly_budget_usd": 0.004})
+    assert r.status_code == 400
+    assert h.client.get("/settings").get_json()["settings"]["monthly_budget_usd"] == 10.0
+
+
+def test_concurrent_setting_saves_do_not_undo_each_other(h):
+    import threading
+    keys = [f"k{i}" for i in range(20)]
+    threads = [threading.Thread(target=lambda k=k: h.store.update_json_meta("t", lambda cur: {**cur, k: True}))
+               for k in keys]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert set(json.loads(h.store.get_meta("t"))) == set(keys)
+
+
+def test_calendar_move_sends_only_changed_fields(h):
+    start = at(2, 10)
+    h.script(metered(calls=[call("calendar_update", event_id="e1", title=None, start=at(2, 15), end=None,
+                                 location=None, say="Taşıdım.")]))
+    out = ask_v2(h, "kurul toplantısını 3'e al", {"calendar": [phone_event(True, start)]})
+    action = out["actions"][0]
+    assert "title" not in action and "location" not in action

@@ -154,7 +154,7 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
     def health():
         return jsonify({"ok": True, "service": "zoro", "version": VERSION})
 
-    def run_brain(turn: Turn, message: str) -> dict[str, Any]:
+    def run_brain(turn: Turn, message: str, rules_fallback: bool = True) -> dict[str, Any] | None:
         # The v1 app gives up after 10 s (OkHttp default read timeout).
         budget = cfg.turn_budget_v2_s if turn.client.capabilities else cfg.turn_budget_v1_s
         turn.deadline = time.monotonic() + budget
@@ -162,6 +162,8 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
             return brain().answer(turn, message)
         except AIUnavailable as error:
             log.error("AI unavailable: %s", error)
+            if not rules_fallback:
+                return None
             if turn.tools_called:
                 # Some tools already ran: never repeat them through the rules.
                 done = ". ".join(turn.notes)
@@ -191,7 +193,14 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
         data = request.get_json(silent=True) or {}
         turn = new_turn(data if isinstance(data, dict) else {})
         turn.feature = "sabah_ozeti"
-        return jsonify(run_brain(turn, briefing_message(turn)))
+        # The briefing must not answer an open "silinsin mi?" or use up the phone's note.
+        turn.pending = None
+        turn.client_note = ""
+        result = run_brain(turn, briefing_message(turn), rules_fallback=False)
+        if result is None:
+            # The phone reads its own local briefing instead of a keyword-rule sentence.
+            return jsonify({"success": False, "reply": "", "error": "ai_unavailable", "actions": []}), 503
+        return jsonify(result)
 
     # ------------------------------------- settings, costs, natural voice
 
@@ -235,7 +244,10 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
         if not user_settings.paid_allowed(store, current, now.strftime("%Y-%m")):
             return jsonify({"success": False, "error": "budget"}), 402
         chosen = data.get("voice") if preview and data.get("voice") in user_settings.VOICES else current["voice"]
-        events = voice.speech_events(openai_client(), cfg.tts_model, chosen, text, timeout=15.0)
+        client = openai_client()
+        if hasattr(client, "with_options"):
+            client = client.with_options(max_retries=0)  # never outwait the phone (8 s read timeout)
+        events = voice.speech_events(client, cfg.tts_model, chosen, text, timeout=6.0)
         try:
             first = next(events)  # surface upstream errors as a status code, not a broken stream
         except (voice.VoiceUnavailable, StopIteration) as error:
@@ -244,17 +256,26 @@ def create_app(cfg: Config | None = None, openai_factory: Callable[[], Any] | No
 
         def stream():
             pending = [first]
+            sent = 0
+            recorded = False
             try:
                 while True:
                     kind, payload = pending.pop() if pending else next(events)
                     if kind == "audio":
+                        sent += len(payload)
                         yield payload
                     elif kind == "usage":
                         costs.record_speech(store, now, cfg.tts_model, payload)
+                        recorded = True
             except StopIteration:
                 return
             except voice.VoiceUnavailable as error:
                 log.warning("tts stream cut: %s", error)
+            finally:
+                events.close()
+                if not recorded and sent:
+                    # Cut short (phone gone, network): OpenAI still bills it, so estimate.
+                    costs.record_speech(store, now, cfg.tts_model, voice.estimated_usage(text, sent))
 
         return Response(stream_with_context(stream()), mimetype="application/octet-stream",
                         headers={"X-Zoro-Audio": f"pcm_s16le;rate={voice.SAMPLE_RATE};channels=1",

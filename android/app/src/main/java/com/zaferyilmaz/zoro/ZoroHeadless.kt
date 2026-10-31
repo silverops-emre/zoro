@@ -1,16 +1,8 @@
 package com.zaferyilmaz.zoro
 
-import android.Manifest
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.content.Context
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -27,8 +19,6 @@ import org.json.JSONObject
 object ZoroHeadless {
 
     private const val TAG = "ZORO_HEADLESS"
-    private const val BRIEFING_CHANNEL = "zoro_morning_briefing"
-    private const val BRIEFING_NOTIFICATION = 100011
 
     private val main = Handler(Looper.getMainLooper())
     private val http by lazy { ZoroServer.buildHttpClient() }
@@ -65,8 +55,9 @@ object ZoroHeadless {
                 val body = ZoroServer.askBody(
                     message = message,
                     calendar = calendar,
-                    clientNote = ZoroServer.takeClientNote(),
-                    recentCalls = ZoroCallLog.recentCalls(context)
+                    // Sabah ozeti bekleyen notu ("hangi Okay?") tuketmez.
+                    clientNote = if (briefing) null else ZoroServer.takeClientNote(),
+                    recentCalls = ZoroCallLog.recentCalls(context, message, briefing)
                 ).toString().toRequestBody("application/json; charset=utf-8".toMediaType())
 
                 http.newCall(Request.Builder().url(ZoroServer.url(path)).post(body).build())
@@ -89,14 +80,27 @@ object ZoroHeadless {
 
         val context = service.applicationContext
 
-        if (reply == null) {
-            if (!briefing) {
-                service.speakReply("Sunucuya bağlanamadım. İnternet bağlantınızı kontrol edin.", false, null)
-            }
+        // Kullanici bu arada dinlemeyi durdurduysa ne cevap okunur ne is yapilir.
+        if (!ZoroVoiceService.isActive) {
             return
         }
 
-        val json = reply.json
+        val json = reply?.json
+
+        if (briefing && (reply == null || reply.code !in 200..299 || json == null ||
+                    json.optString("error").isNotBlank())
+        ) {
+            // Sunucu ya da yapay zeka yoksa 2.0'daki gibi telefonun kendi ozeti okunur.
+            val local = ZoroMorningBriefingReceiver.buildMorningBriefing(context)
+            ZoroMorningBriefingReceiver.showNotification(context, local)
+            service.speakReply(local, false, null)
+            return
+        }
+
+        if (reply == null) {
+            service.speakReply("Sunucuya bağlanamadım. İnternet bağlantınızı kontrol edin.", false, null)
+            return
+        }
 
         if (reply.code !in 200..299 || json == null) {
             val text = when (reply.code) {
@@ -104,7 +108,7 @@ object ZoroHeadless {
                 else -> json?.optString("reply", "").orEmpty()
                     .ifBlank { "Sunucu cevabında bir sorun oluştu." }
             }
-            if (!briefing) service.speakReply(text, false, null)
+            service.speakReply(text, false, null)
             return
         }
 
@@ -125,7 +129,7 @@ object ZoroHeadless {
         }
 
         if (briefing && spoken.isNotBlank()) {
-            showBriefingNotification(context, spoken)
+            ZoroMorningBriefingReceiver.showNotification(context, spoken)
         }
 
         service.speakReply(spoken, listenForReply = expectReply && failures.isEmpty()) {
@@ -138,39 +142,6 @@ object ZoroHeadless {
                 ZoroServer.clientNote = text
                 service.speakReply(text, listenForReply = text.trimEnd().endsWith("?"), after = null)
             }
-        }
-    }
-
-    private fun showBriefingNotification(context: Context, text: String) {
-
-        if (
-            Build.VERSION.SDK_INT >= 33 &&
-            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            return
-        }
-
-        try {
-            val manager = context.getSystemService(NotificationManager::class.java)
-            if (manager.getNotificationChannel(BRIEFING_CHANNEL) == null) {
-                manager.createNotificationChannel(
-                    NotificationChannel(BRIEFING_CHANNEL, "Zoro sabah özeti", NotificationManager.IMPORTANCE_DEFAULT)
-                )
-            }
-
-            val notification = NotificationCompat.Builder(context, BRIEFING_CHANNEL)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle("Zoro sabah özeti")
-                .setContentText(text)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-                .setAutoCancel(true)
-                .build()
-
-            NotificationManagerCompat.from(context).notify(BRIEFING_NOTIFICATION, notification)
-
-        } catch (error: Exception) {
-            Log.e(TAG, "Sabah ozeti bildirimi gosterilemedi", error)
         }
     }
 }
