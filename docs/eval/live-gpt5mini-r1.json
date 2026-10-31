@@ -1,0 +1,253 @@
+{
+  "summary": {
+    "model": "gpt-5-mini",
+    "effort": "low",
+    "calls": 19,
+    "input_tokens": 53441,
+    "output_tokens": 3330,
+    "estimated_usd": 0.02,
+    "passed": 17,
+    "total": 18
+  },
+  "rows": [
+    {
+      "n": 1,
+      "status": "FAIL",
+      "message": "Beni İstanbul'a götür",
+      "v2": true,
+      "tools": [],
+      "actions": [],
+      "reply": "Aracıyla mı, yürüyerek mi yoksa toplu taşıma ile mi gitmek istersiniz, Zafer Bey?",
+      "seconds": 3.6,
+      "problems": [
+        "missing ['navigate']",
+        "no navigate action"
+      ]
+    },
+    {
+      "n": 2,
+      "status": "PASS",
+      "message": "Toplantım ne zaman?",
+      "v2": true,
+      "tools": [],
+      "actions": [],
+      "reply": "Zafer Bey, yarın 14:00–15:00 arası Silivri toplantınız var. Ayrıca 2 Kasım Pazartesi 19:00–21:00 arasında telefon takviminde kayıtlı bir aile yemeğiniz görünüyor.",
+      "seconds": 5.2,
+      "problems": []
+    },
+    {
+      "n": 3,
+      "status": "PASS",
+      "message": "Silivri'deki toplantıyı söyle",
+      "v2": true,
+      "tools": [],
+      "actions": [],
+      "reply": "Zafer Bey, yarın 14:00–15:00 arasında \"Silivri toplantısı\"nız var; yer: Silivri. Yol tarifi ister misiniz?",
+      "seconds": 4.6,
+      "problems": []
+    },
+    {
+      "n": 4,
+      "status": "PASS",
+      "message": "Yarın sabah 9'da Okay'ı aramamı hatırlat",
+      "v2": true,
+      "tools": [
+        "add_task"
+      ],
+      "actions": [
+        "schedule_reminder"
+      ],
+      "reply": "Yarın 09:00'da Okay'ı aramanızı hatırlatacağım.",
+      "seconds": 3.6,
+      "problems": []
+    },
+    {
+      "n": 5,
+      "status": "PASS",
+      "message": "Okay'ı ara",
+      "v2": true,
+      "tools": [
+        "call_contact"
+      ],
+      "actions": [
+        "call"
+      ],
+      "reply": "Okay'ı arıyorum.",
+      "seconds": 2.2,
+      "problems": []
+    },
+    {
+      "n": 6,
+      "status": "PASS",
+      "message": "Okay'a yarın geliyorum diye WhatsApp'tan yaz",
+      "v2": true,
+      "tools": [
+        "send_message"
+      ],
+      "actions": [
+        "message"
+      ],
+      "reply": "Okay'a WhatsApp'ta 'Yarın geliyorum.' mesaj taslağını açıyorum; siz gönderirsiniz.",
+      "seconds": 3.6,
+      "problems": []
+    },
+    {
+      "n": 7,
+      "status": "PASS",
+      "message": "Bekle biraz",
+      "v2": true,
+      "tools": [],
+      "actions": [],
+      "reply": "Tamam Zafer Bey, bekliyorum.",
+      "seconds": 2.5,
+      "problems": []
+    },
+    {
+      "n": 8,
+      "status": "PASS",
+      "message": "Cuma günü saat 3'te Ahmet Bey'le görüşmemi takvime ekle",
+      "v2": true,
+      "tools": [
+        "calendar_add"
+      ],
+      "actions": [
+        "calendar_add"
+      ],
+      "reply": "Cuma 15:00'te Ahmet Bey'le görüşmenizi takvime ekledim.",
+      "seconds": 5.3,
+      "problems": []
+    },
+    {
+      "n": 9,
+      "status": "PASS",
+      "message": "Her gün akşam 8'de ilacımı hatırlat",
+      "v2": true,
+      "tools": [
+        "add_task"
+      ],
+      "actions": [
+        "schedule_reminder"
+      ],
+      "reply": "Her gün 20:00'de ilacınızı hatırlatacağım.",
+      "seconds": 4.8,
+      "problems": []
+    },
+    {
+      "n": 10,
+      "status": "PASS",
+      "message": "Bugün İstanbul'da hava nasıl?",
+      "v2": true,
+      "tools": [
+        "get_weather"
+      ],
+      "actions": [],
+      "reply": "Zafer Bey, İstanbul'da şu an hava kapalı, sıcaklık 13 derece (hissedilen 13), rüzgar 5,5 km/s. Bugün en yüksek 16, en düşük 13; yağış olasılığı %20. Önce hazırlanmak ister miseniz şemsiye alın.",
+      "seconds": 5.7,
+      "problems": []
+    },
+    {
+      "n": 11,
+      "status": "PASS",
+      "message": "Dolar kaç lira?",
+      "v2": true,
+      "tools": [
+        "get_exchange_rates"
+      ],
+      "actions": [],
+      "reply": "Zafer Bey, 1 USD = 49.77 TL (alış) / 49.86 TL (satış) — TCMB, 30 Ekim 2026. Başka döviz bakmak ister misiniz?",
+      "seconds": 7.9,
+      "problems": []
+    },
+    {
+      "n": 12,
+      "status": "PASS",
+      "message": "Arabamın plakası 34 ZY 1234, bunu unutma",
+      "v2": true,
+      "tools": [
+        "remember"
+      ],
+      "actions": [],
+      "reply": "Arabanızın plakası 34 ZY 1234 olarak kaydedildi, unutmayacağım.",
+      "seconds": 3.6,
+      "problems": []
+    },
+    {
+      "n": 13,
+      "status": "PASS",
+      "message": "Plakam neydi?",
+      "v2": true,
+      "tools": [],
+      "actions": [],
+      "reply": "Arabanızın plakası 34 ZY 1234.",
+      "seconds": 2.5,
+      "problems": []
+    },
+    {
+      "n": 14,
+      "status": "PASS",
+      "message": "Yarın 7'de beni uyandır",
+      "v2": true,
+      "tools": [
+        "set_alarm"
+      ],
+      "actions": [
+        "set_alarm"
+      ],
+      "reply": "Yarın 07:00'de sizi uyandıracağım.",
+      "seconds": 4.6,
+      "problems": []
+    },
+    {
+      "n": 15,
+      "status": "PASS",
+      "message": "YouTube'da Barış Manço aç",
+      "v2": true,
+      "tools": [
+        "open_app"
+      ],
+      "actions": [
+        "open_app"
+      ],
+      "reply": "YouTube'da Barış Manço'yu açıyorum.",
+      "seconds": 2.4,
+      "problems": []
+    },
+    {
+      "n": 16,
+      "status": "PASS",
+      "message": "Silivri toplantısını iptal et",
+      "v2": true,
+      "tools": [
+        "calendar_delete"
+      ],
+      "actions": [],
+      "reply": "Silivri toplantısı (yarın 14:00) etkinliğini takvimden sileyim mi?",
+      "seconds": 3.2,
+      "problems": []
+    },
+    {
+      "n": 17,
+      "status": "PASS",
+      "message": "evet",
+      "v2": true,
+      "tools": [],
+      "actions": [
+        "calendar_delete"
+      ],
+      "reply": "Takvimden sildim: Silivri toplantısı.",
+      "seconds": 0.0,
+      "problems": []
+    },
+    {
+      "n": 18,
+      "status": "PASS",
+      "message": "Beni İstanbul'a götür",
+      "v2": false,
+      "tools": [],
+      "actions": [],
+      "reply": "Zafer Bey, bu telefonda doğrudan navigasyon başlatamıyorum — uygulamanın güncellenmesi gerekiyor. İsterseniz bulunduğunuz noktadan İstanbul'a araç, toplu taşıma veya yürüme yön tarifi vereyim; hangisini istersiniz?",
+      "seconds": 5.4,
+      "problems": []
+    }
+  ]
+}

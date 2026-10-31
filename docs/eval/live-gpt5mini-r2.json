@@ -1,0 +1,66 @@
+{
+  "summary": {
+    "model": "gpt-5-mini",
+    "effort": "low",
+    "calls": 6,
+    "input_tokens": 15678,
+    "output_tokens": 684,
+    "estimated_usd": 0.0053,
+    "passed": 4,
+    "total": 4
+  },
+  "rows": [
+    {
+      "n": 1,
+      "status": "PASS",
+      "message": "Beni İstanbul'a götür",
+      "v2": true,
+      "tools": [
+        "navigate"
+      ],
+      "actions": [
+        "navigate"
+      ],
+      "reply": "İstanbul için yol tarifini başlatıyorum.",
+      "seconds": 2.5,
+      "problems": []
+    },
+    {
+      "n": 10,
+      "status": "PASS",
+      "message": "Bugün İstanbul'da hava nasıl?",
+      "v2": true,
+      "tools": [
+        "get_weather"
+      ],
+      "actions": [],
+      "reply": "İstanbul şu an kapalı, sıcaklık 13 derece civarı; yağış ihtimali düşük. Bugün en yüksek 16, en düşük 13 derece.",
+      "seconds": 4.7,
+      "problems": []
+    },
+    {
+      "n": 11,
+      "status": "PASS",
+      "message": "Dolar kaç lira?",
+      "v2": true,
+      "tools": [
+        "get_exchange_rates"
+      ],
+      "actions": [],
+      "reply": "Merkez Bankası verilerine göre 30 Ekim 2026 itibarıyla 1 Amerikan Doları alış 49 lira 77 kuruş, satış 49 lira 86 kuruş.",
+      "seconds": 7.2,
+      "problems": []
+    },
+    {
+      "n": 18,
+      "status": "PASS",
+      "message": "Beni İstanbul'a götür",
+      "v2": false,
+      "tools": [],
+      "actions": [],
+      "reply": "Zafer Bey, doğrudan navigasyon başlatamıyorum; telefonunuz bu sürümüyle yol tarifi açamıyor. Hangi adrese veya İstanbul'un neresine gitmek istiyorsunuz, söyleyin; size sözlü yol tarifi vereyim.",
+      "seconds": 4.8,
+      "problems": []
+    }
+  ]
+}

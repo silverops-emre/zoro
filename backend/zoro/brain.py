@@ -10,7 +10,7 @@ from typing import Any
 
 from .store import Store
 from .timeutil import human_time, iso, long_date, parse_iso
-from .tools import CAP_LABELS, Turn, execute, execute_pending, task_ref, task_when, tool_specs
+from .tools import CAP_LABELS, FINAL_TOOLS, Turn, execute, execute_pending, task_ref, task_when, tool_specs
 
 log = logging.getLogger("zoro.brain")
 
@@ -22,13 +22,15 @@ class AIUnavailable(Exception):
 INSTRUCTIONS = """Sen Zoro'sun: {full_name} için çalışan Türkçe, sesli kişisel asistansın. Cevapların telefonda sesli okunur.
 
 Konuşma
-- Kısa, doğal, sıcak ve saygılı konuş. Gerektiğinde "{title}" diye hitap et, her cümlede değil.
+- Kısa, doğal, sıcak ve saygılı konuş. Her zaman "siz" diye hitap et (yaparsınız, aramanız). Gerektiğinde "{title}" de, her cümlede değil.
 - Cevap genelde 1-2 cümle. Liste okurken en fazla 5 madde söyle, kalanı "ve N tane daha" diye özetle.
-- Emoji, markdown, madde işareti, bağlantı kullanma. Saatleri 14:30 gibi yaz.
+- Emoji, markdown, madde işareti, bağlantı ve sembol (=, /, —, %, parantez) kullanma; konuşur gibi yaz ("yüzde 20", "49 lira 86 kuruş"). Saatleri 14:30 gibi yaz.
+- Hava durumunu en fazla 2 cümlede söyle: durum, sıcaklık, yağış ihtimali yüksekse o. Rüzgâr gibi ayrıntıyı sorulmadıkça söyleme.
 - Eksik ya da belirsiz istekte tahmin yürütme, tek kısa soru sor.
 
 Eylemler
 - Bir iş istendiğinde ilgili aracı çağır. Araç ok:true dönmeden "yaptım" deme. Araç hata dönerse sebebini kısaca söyle.
+- Eylem araçlarının "say" alanına, işlem başarılı olursa söylenecek kısa cümleyi yaz (örn. "Yarın 09:00'da Okay'ı aramanızı hatırlatacağım.").
 - Aracı olmayan işi yapamadığını dürüstçe söyle, yapabildiğin en yakın şeyi öner.
 - "Hatırlat", "unutmayayım", "alarm kur ki ...", "her gün 9'da ..." → add_task (telefon o saatte sesli hatırlatır).
 - Toplantı, randevu, görüşme, etkinlik → takvim araçları (calendar_*). "Takvime" denmese de böyledir. Takvim sorularını bağlamdaki takvimden cevapla.
@@ -37,8 +39,8 @@ Eylemler
 - Zamanı daima bağlamdaki "Şu an" bilgisine göre hesapla ve araçlara saat dilimli ISO-8601 ver (örn. 2026-11-03T14:00:00+03:00). Saat hiç söylenmediyse sor. "Sabah" 09:00, "öğlen" 12:00, "öğleden sonra" 15:00, "akşam" 19:00 kabul et ve cevapta saati söyle.
 - Silme işlemlerinde sadece aracı çağır; onayı sistem kullanıcıya soracak.
 - Takvimde yalnızca kaynağı "Zoro" olan etkinlikler değiştirilebilir ya da silinebilir.
-- "Beni X'e götür", "X'e yol tarifi" → navigate. "X'i ara" → call_contact. "X'e yaz", "mesaj at" → send_message (taslak açılır, gönder tuşuna kullanıcı basar; bunu söyle).
-- Bağlamdaki "Telefonun yapabildikleri" listesinde olmayan bir telefon işini yapamazsın. Bunu söyle ve uygulamanın güncellenmesi gerektiğini ekle.
+- "Beni X'e götür", "X'e yol tarifi" → hemen navigate çağır; ulaşım şekli söylenmediyse driving kullan, sorma. "X'i ara" → call_contact. "X'e yaz", "mesaj at" → send_message (taslak açılır, gönder tuşuna kullanıcı basar; bunu söyle).
+- Bağlamdaki "Telefonun yapabildikleri" listesinde olmayan bir telefon işini yapamazsın. Bunu söyle ve uygulamanın güncellenmesi gerektiğini ekle; yerine sözlü yol tarifi gibi doğrulayamayacağın bir şey teklif etme.
 - Hava durumu → get_weather. Döviz → get_exchange_rates.{web_line}
 - Güncel bilgiyi uydurma. Emin olmadığın bilgiyi emin gibi söyleme.
 
@@ -88,7 +90,8 @@ def context_block(turn: Turn, message: str) -> str:
     if caps:
         lines.append("Telefonun yapabildikleri: " + ", ".join(caps) + ".")
     else:
-        lines.append("Telefonun yapabildikleri: yok (eski uygulama sürümü; yalnızca sunucu hatırlatmaları ve hafıza).")
+        lines.append("Telefonun yapabildikleri: yok (eski uygulama sürümü; yalnızca sunucu hatırlatmaları ve hafıza). "
+                     "Navigasyon, arama, mesaj ve takvim değişikliği yapamazsın; sözlü yol tarifi de teklif etme.")
 
     tasks = turn.store.list_tasks(pending_only=True)
     if tasks:
@@ -157,8 +160,12 @@ def yes_no(message: str) -> str | None:
 # ---------------------------------------------------------------- loop
 
 def _clean_reply(text: str) -> str:
+    """Make the reply safe for text-to-speech."""
     text = re.sub(r"[*#`_]+", "", text or "")
     text = re.sub(r"^\s*[-•]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"(\d{1,2}[:.]\d{2})\s*[–—-]\s*(\d{1,2}[:.]\d{2})", r"\1 ile \2", text)
+    text = re.sub(r"%\s*(\d+)", r"yüzde \1", text)
+    text = re.sub(r"\s+[—–]\s+", ", ", text)
     return " ".join(text.split())
 
 
@@ -242,6 +249,10 @@ class Brain:
                     "call_id": _attr(call, "call_id"),
                     "output": json.dumps(result, ensure_ascii=False, default=str),
                 })
+            if turn.says and len(turn.says) == len(calls) and all(_attr(c, "name") in FINAL_TOOLS for c in calls):
+                # Every call succeeded and came with its own sentence: skip round two.
+                return self._finish(turn, message, _clean_reply(" ".join(turn.says)), started)
+            turn.says.clear()
             if turn.pending_created:
                 # Destructive request: ask the server-built question, nothing else.
                 done = [n for n in turn.notes]

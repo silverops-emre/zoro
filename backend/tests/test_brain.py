@@ -353,3 +353,36 @@ def test_reasoning_effort_is_sent_only_when_configured(tmp_path):
     h2.script(resp("ok"))
     h2.ask("x")
     assert "reasoning" not in h2.calls[0]
+
+
+def test_say_skips_the_second_model_round(h):
+    h.script(resp(calls=[call("add_task", text="Su iç", due_at=at(1, 9), repeat="none",
+                              say="Yarın 09:00'da su içmenizi hatırlatacağım.")]))
+    out = h.ask("yarın 9'da su içmemi hatırlat")
+    assert len(h.calls) == 1
+    assert out["reply"] == "Yarın 09:00'da su içmenizi hatırlatacağım."
+    assert out["action"] == "add_task"
+    assert "say" in h.calls[0]["tools"][0]["parameters"]["required"]
+
+
+def test_say_is_ignored_when_the_tool_fails(h):
+    h.script(resp(calls=[call("add_task", text="x", due_at=at(-1, 9), repeat="none", say="Kurdum.")]),
+             resp("O saat geçmiş, yeni bir saat söyler misiniz?"))
+    out = h.ask("dün 9'da hatırlat")
+    assert len(h.calls) == 2
+    assert out["reply"].startswith("O saat geçmiş")
+
+
+def test_info_tools_always_get_a_second_round(h, monkeypatch):
+    from zoro import info
+    monkeypatch.setattr(info, "weather", lambda city, tz: {"ok": True, "simdi": {"sicaklik": 18}})
+    h.script(resp(calls=[call("get_weather", city="İstanbul")]), resp("İstanbul'da hava 18 derece."))
+    out = h.ask("hava nasıl")
+    assert len(h.calls) == 2 and "18" in out["reply"]
+    assert "say" not in h.calls[0]["tools"][[t["name"] for t in h.calls[0]["tools"]].index("get_weather")]["parameters"]["properties"]
+
+
+def test_reply_is_tts_friendly(h):
+    h.script(resp("Yarın 14:00–15:00 arası toplantınız var — yağış ihtimali %20."))
+    out = h.ask("yarın ne var")
+    assert out["reply"] == "Yarın 14:00 ile 15:00 arası toplantınız var, yağış ihtimali yüzde 20."

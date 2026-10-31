@@ -81,6 +81,7 @@ class Turn:
     pending: dict[str, Any] | None = None  # open confirmation (from DB)
     pending_created: dict[str, Any] | None = None
     tools_called: list[str] = field(default_factory=list)
+    says: list[str] = field(default_factory=list)
 
     def set_legacy(self, fields: dict[str, Any]) -> None:
         # The v1 app understands a single action per response: keep the first.
@@ -555,6 +556,13 @@ def _fn(name: str, description: str, properties: dict[str, Any]) -> dict[str, An
 S = {"type": "string"}
 S_NULL = {"type": ["string", "null"]}
 
+# Tools whose success needs no second model round: the model writes the
+# sentence to speak up front in `say`, which halves the latency.
+FINAL_TOOLS = {"add_task", "complete_task", "snooze_task", "edit_task", "remember", "calendar_add",
+               "calendar_update", "navigate", "call_contact", "send_message", "open_app", "set_alarm", "set_timer"}
+SAY = {"type": ["string", "null"],
+       "description": "İşlem başarılı olursa kullanıcıya söylenecek kısa cümle (siz diliyle, saat/tarih dahil)."}
+
 ToolFn = Callable[..., dict[str, Any]]
 
 # name -> (capability or None, spec, implementation)
@@ -562,6 +570,9 @@ REGISTRY: dict[str, tuple[str | None, dict[str, Any], ToolFn]] = {}
 
 
 def _register(cap: str | None, spec: dict[str, Any], fn: ToolFn) -> None:
+    if spec["name"] in FINAL_TOOLS:
+        spec["parameters"]["properties"]["say"] = SAY
+        spec["parameters"]["required"].append("say")
     REGISTRY[spec["name"]] = (cap, spec, fn)
 
 
@@ -678,8 +689,12 @@ def execute(turn: Turn, name: str, arguments: str) -> dict[str, Any]:
             raise ValueError("arguments must be an object")
     except ValueError:
         return fail("Araç argümanları geçerli JSON değil.")
+    say = args.pop("say", None)
     try:
-        return impl(turn, **args)
+        result = impl(turn, **args)
+        if result.get("ok") and name in FINAL_TOOLS and isinstance(say, str) and say.strip():
+            turn.says.append(say.strip())
+        return result
     except TypeError as error:
         return fail(f"Argümanlar hatalı: {error}")
     except Exception as error:  # never let one tool crash the turn
