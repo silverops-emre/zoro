@@ -18,6 +18,11 @@
     <uses-permission android:name="android.permission.CALL_PHONE" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
+    <!-- ZORO_V2: Android 14+ SCHEDULE_EXACT_ALARM'i varsayilan vermez,
+         hatirlatmalar dakikalarca gecikir. Hatirlatma uygulamasi oldugu icin
+         USE_EXACT_ALARM kurulumda otomatik verilir. -->
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />

@@ -364,7 +364,7 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                 },
                 lastReply = lastReply,
                 askText = { text ->
-                    askZoro(text)
+                    askZoro(text, typed = true)
                 }
             )
             }
@@ -1413,7 +1413,8 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
     private fun askZoro(
         message: String,
         refreshTasksAfter: Boolean = false,
-        fromTaskScreen: Boolean = false
+        fromTaskScreen: Boolean = false,
+        typed: Boolean = false
     ) {
 
 
@@ -1621,7 +1622,8 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
 
                                     speakThen(
                                         text = spoken,
-                                        listenForReply = expectReply && failures.isEmpty()
+                                        // Yazili komutta sesli takip penceresi acilmaz.
+                                        listenForReply = expectReply && failures.isEmpty() && !typed
                                     ) {
 
                                         if (serverActions != null && failures.isEmpty()) {
@@ -1727,6 +1729,7 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                 }
 
                 runOnUiThread {
+                    lastReply = answer
                     speak(
                         answer,
                         "ZORO_MEMORY_REPLY"
@@ -1761,6 +1764,7 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                 }
 
                 runOnUiThread {
+                    lastReply = answer
                     speak(
                         answer,
                         "ZORO_REMINDER_VOICE_REPLY"
@@ -1790,6 +1794,7 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                 }
 
                 runOnUiThread {
+                    lastReply = answer
                     speak(
                         answer,
                         "ZORO_CALENDAR_ADD_REPLY"
@@ -1819,6 +1824,7 @@ class MainActivity : ComponentActivity(), ZoroReminderPort {
                 }
 
                 runOnUiThread {
+                    lastReply = answer
                     speak(
                         answer,
                         "ZORO_CALENDAR_REPLY"
