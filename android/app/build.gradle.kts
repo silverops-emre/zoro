@@ -1,7 +1,23 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
+
+// ZORO_V2_SERVER_CONFIG
+// Sunucu adresi ve sifreler android/zoro.properties dosyasindan okunur.
+// Bu dosya git'e girmez; ornegi zoro.properties.example.
+val zoroProps = Properties().apply {
+    val file = rootProject.file("zoro.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+
+fun zoroProp(key: String, default: String = ""): String =
+    (zoroProps.getProperty(key) ?: default)
+        .trim()
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
 
 android {
     namespace = "com.zaferyilmaz.zoro"
@@ -13,13 +29,24 @@ android {
         applicationId = "com.zaferyilmaz.zoro"
         minSdk = 24
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
+
+        buildConfigField("String", "ZORO_SERVER_URL", "\"${zoroProp("zoro.serverUrl", "https://37-27-156-54.sslip.io")}\"")
+        buildConfigField("String", "ZORO_BASIC_USER", "\"${zoroProp("zoro.basicUser")}\"")
+        buildConfigField("String", "ZORO_BASIC_PASSWORD", "\"${zoroProp("zoro.basicPassword")}\"")
+        buildConfigField("String", "ZORO_API_KEY", "\"${zoroProp("zoro.apiKey")}\"")
+
+        // Yalnizca debug derlemede yerel http sunucusuna izin ver.
+        manifestPlaceholders["usesCleartextTraffic"] = "false"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
+        debug {
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
+        }
         release {
             optimization {
                 enable = true
@@ -33,6 +60,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

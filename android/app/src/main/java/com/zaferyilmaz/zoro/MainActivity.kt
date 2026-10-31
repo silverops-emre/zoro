@@ -16,6 +16,7 @@ import android.os.Build
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import android.widget.Toast
 
@@ -35,6 +36,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 
@@ -45,6 +47,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 
@@ -72,6 +75,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 import java.io.IOException
@@ -106,17 +110,28 @@ enum class ZoroTaskOperation(
 // ANA ACTIVITY
 // ==========================================
 
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), ZoroReminderPort {
 
     private lateinit var textToSpeech: TextToSpeech
 
-    private val httpClient = OkHttpClient()
+    // ZORO_V2_SERVER_CONFIG
+    // Sunucu adresi ve kimlik bilgisi zoro.properties dosyasindan gelir.
+    private val httpClient: OkHttpClient = ZoroServer.buildHttpClient()
 
-    private val backendUrl =
-        "http://192.168.1.108:5050/ask"
+    private val backendUrl: String
+        get() = ZoroServer.url("/ask")
 
-    private val tasksUrl =
-        "http://192.168.1.108:5050/tasks"
+    private val tasksUrl: String
+        get() = ZoroServer.url("/tasks")
+
+    // Son sunucu cevabi ana ekranda yazili da gorunur.
+    private var lastReply by mutableStateOf("")
+
+    // Cevap okunduktan sonra yapilacak is (harita, arama ...).
+    private var afterSpeechId: String? = null
+    private var afterSpeech: (() -> Unit)? = null
+    private var listenAfterSpeech = false
+    private var servicePausedForSpeech = false
 
     private val tag = "ZORO_REMINDER"
 
@@ -271,6 +286,7 @@ class MainActivity : ComponentActivity() {
         createNotificationChannel()
         readSavedVoiceStatus()
         registerVoiceReceiver()
+        syncLocalMemoriesOnce()
 
         setContent {
 
@@ -345,6 +361,10 @@ class MainActivity : ComponentActivity() {
                 },
                 performTaskAction = { task, operation ->
                     performTaskAction(task, operation)
+                },
+                lastReply = lastReply,
+                askText = { text ->
+                    askZoro(text)
                 }
             )
             }
@@ -397,6 +417,22 @@ class MainActivity : ComponentActivity() {
                 2002
             )
         }
+
+        // ZORO_V2_PERMISSIONS
+        // "Okay'i ara", "Okay'a yaz" icin rehber ve arama izni.
+        val callPermissions = arrayOf(
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.CALL_PHONE
+        ).filter {
+            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (callPermissions.isNotEmpty()) {
+            requestPermissions(
+                callPermissions.toTypedArray(),
+                2003
+            )
+        }
     }
 
     // ==========================================
@@ -417,6 +453,27 @@ class MainActivity : ComponentActivity() {
 
                 textToSpeech.setPitch(0.85f)
                 textToSpeech.setSpeechRate(0.95f)
+
+                textToSpeech.setOnUtteranceProgressListener(
+                    object : UtteranceProgressListener() {
+
+                        override fun onStart(utteranceId: String?) {
+                        }
+
+                        override fun onDone(utteranceId: String?) {
+                            runOnUiThread { onSpeechFinished(utteranceId) }
+                        }
+
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String?) {
+                            runOnUiThread { onSpeechFinished(utteranceId) }
+                        }
+
+                        override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                            runOnUiThread { onSpeechFinished(utteranceId) }
+                        }
+                    }
+                )
             }
         }
     }
@@ -466,16 +523,79 @@ class MainActivity : ComponentActivity() {
 
         val cleanText = cleanTextForSpeech(text)
 
-        if (cleanText.isBlank()) return
+        if (cleanText.isBlank() || !::textToSpeech.isInitialized) {
+            onSpeechFinished(utteranceId)
+            return
+        }
 
-        if (::textToSpeech.isInitialized) {
+        // ZORO_V2_SPEECH_SYNC
+        // Konusurken arka plandaki dinleme servisini sustur.
+        if (ZoroVoiceService.isActive) {
+            servicePausedForSpeech = true
+            ZoroVoiceService.pauseForSpeech()
+        }
 
-            textToSpeech.speak(
-                cleanText,
-                TextToSpeech.QUEUE_FLUSH,
-                null,
-                utteranceId
-            )
+        val result = textToSpeech.speak(
+            cleanText,
+            TextToSpeech.QUEUE_FLUSH,
+            null,
+            utteranceId
+        )
+
+        if (result != TextToSpeech.SUCCESS) {
+            onSpeechFinished(utteranceId)
+        }
+    }
+
+    // ==========================================
+    // ZORO 2.0: KONUS, SONRA YAP
+    // ==========================================
+
+    private fun speakThen(
+        text: String,
+        listenForReply: Boolean,
+        after: (() -> Unit)?
+    ) {
+
+        val id = "ZORO_REPLY_" + System.currentTimeMillis()
+
+        afterSpeechId = id
+        afterSpeech = after
+        listenAfterSpeech = listenForReply
+
+        speak(text, id)
+    }
+
+    private fun onSpeechFinished(utteranceId: String?) {
+
+        var listen = false
+
+        if (utteranceId != null && utteranceId == afterSpeechId) {
+
+            val work = afterSpeech
+            listen = listenAfterSpeech
+
+            afterSpeechId = null
+            afterSpeech = null
+            listenAfterSpeech = false
+
+            try {
+                work?.invoke()
+            } catch (error: Exception) {
+                Log.e("ZORO_ACTIONS", "Cevap sonrasi islem hatasi", error)
+            }
+        }
+
+        if (servicePausedForSpeech) {
+
+            servicePausedForSpeech = false
+            ZoroVoiceService.resumeAfterSpeech(listenForReply = listen)
+
+        } else if (listen) {
+
+            // Arka plan dinleme kapaliysa soruya cevabi
+            // Google ses penceresiyle al.
+            startVoiceInput()
         }
     }
 
@@ -1295,161 +1415,21 @@ class MainActivity : ComponentActivity() {
         refreshTasksAfter: Boolean = false,
         fromTaskScreen: Boolean = false
     ) {
-                                        // ZORO_PERSONAL_MEMORY_ROUTING_V1
-        // Kisisel hafiza komutlarini once yerel olarak isle.
-        if (ZoroMemoryVoice.isMemoryCommand(message)) {
 
-            Thread {
-                val answer = try {
-                    ZoroMemoryVoice.handleCommand(
-                        applicationContext,
-                        message
-                    )
-                } catch (error: Exception) {
-                    Log.e(
-                        "ZORO_MEMORY",
-                        "Hafiza komutu hatasi",
-                        error
-                    )
-                    "Kisisel hafiza islemi tamamlanamadi."
-                }
 
-                runOnUiThread {
-                    speak(
-                        answer,
-                        "ZORO_MEMORY_REPLY"
-                    )
-                }
-            }.start()
-
-            return
-        }
-        // ZORO_CALENDAR_REMINDER_VOICE_ROUTING
-        // Mevcut randevunun hatirlatma suresini sesle degistir.
-        // Bu kontrol genel Python hatirlatmalarindan once calisir.
-        if (
-            ZoroCalendarReminderVoice.isReminderChangeCommand(
-                message
-            )
-        ) {
-
-            Thread {
-                val answer = try {
-                    ZoroCalendarReminderVoice.handleCommand(
-                        applicationContext,
-                        message
-                    )
-                } catch (error: Exception) {
-                    Log.e(
-                        "ZORO_REMINDER_VOICE",
-                        "Hatirlatma suresi komut hatasi",
-                        error
-                    )
-                    "Randevu hatirlatma suresi degistirilemedi."
-                }
-
-                runOnUiThread {
-                    speak(
-                        answer,
-                        "ZORO_REMINDER_VOICE_REPLY"
-                    )
-                }
-            }.start()
-
-            return
-        }
-        // ZORO_CALENDAR_EDIT_ROUTING
-        // Randevu silme ve erteleme komutlarini
-        // telefondaki Zoro takviminde isle.
-        if (ZoroCalendarEdit.isEditCommand(message)) {
-
-            Thread {
-                val answer = try {
-                    ZoroCalendarEdit.handleCommand(
-                        applicationContext,
-                        message
-                    )
-                } catch (error: Exception) {
-                    Log.e(
-                        "ZORO_CALENDAR_EDIT",
-                        "Sesli randevu duzenleme hatasi",
-                        error
-                    )
-                    "Randevu islenirken bir hata olustu."
-                }
-
-                runOnUiThread {
-                    speak(
-                        answer,
-                        "ZORO_CALENDAR_EDIT_REPLY"
-                    )
-                }
-            }.start()
-
-            return
-        }
-        // ZORO_CALENDAR_ADD_ROUTING
-        // Sesli randevulari telefondaki Zoro takvimine kaydet.
-        if (ZoroCalendarVoice.isCalendarAddCommand(message)) {
-
-            Thread {
-                val answer = try {
-                    ZoroCalendarVoice.addCalendarEvent(
-                        applicationContext,
-                        message
-                    )
-                } catch (error: Exception) {
-                    Log.e(
-                        "ZORO_CALENDAR_ADD",
-                        "Sesli randevu ekleme hatasi",
-                        error
-                    )
-                    "Randevu kaydedilirken bir hata olustu."
-                }
-
-                runOnUiThread {
-                    speak(
-                        answer,
-                        "ZORO_CALENDAR_ADD_REPLY"
-                    )
-                }
-            }.start()
-
-            return
-        }
-        // ZORO_CALENDAR_VOICE_ROUTING
-        // Takvim sorgularini Python yerine telefonda isle.
-        if (ZoroCalendarVoice.isCalendarQuery(message)) {
-
-            Thread {
-                val answer = try {
-                    ZoroCalendarVoice.getCalendarAnswer(
-                        applicationContext,
-                        message
-                    )
-                } catch (error: Exception) {
-                    Log.e(
-                        "ZORO_CALENDAR_VOICE",
-                        "Takvim sesli komut hatasi",
-                        error
-                    )
-                    "Takvim sorgusu yapilirken bir hata olustu."
-                }
-
-                runOnUiThread {
-                    speak(
-                        answer,
-                        "ZORO_CALENDAR_REPLY"
-                    )
-                }
-            }.start()
-
-            return
+        // ZORO_V2_SERVER_FIRST
+        // Butun komutlar once sunucudaki yapay zekaya gider.
+        // Takvim baglami da gonderilir ki "toplantim ne zaman" anlasilsin.
+        val calendarContext = try {
+            ZoroActions.calendarContext(applicationContext)
+        } catch (error: Exception) {
+            null
         }
 
-
-        val body = JSONObject()
-            .put("message", message)
+        val body = ZoroServer.askBody(
+            message = message,
+            calendar = calendarContext
+        )
             .toString()
             .toRequestBody(
                 "application/json; charset=utf-8"
@@ -1485,7 +1465,7 @@ class MainActivity : ComponentActivity() {
                                 "Bağlantı kurulamadı. " +
                                         "Görev kaydedilemedi."
 
-                        } else {
+                        } else if (!handleLocalCommand(message)) {
 
                             Toast.makeText(
                                 this@MainActivity,
@@ -1494,7 +1474,7 @@ class MainActivity : ComponentActivity() {
                             ).show()
 
                             speak(
-                                "Bağlantı hatası oluştu.",
+                                "Sunucuya bağlanamadım. İnternet bağlantınızı kontrol edin.",
                                 "ZORO_ERROR"
                             )
                         }
@@ -1515,15 +1495,45 @@ class MainActivity : ComponentActivity() {
                                     ?.string()
                                     .orEmpty()
 
-                            if (!result.isSuccessful) {
-
-                                throw IOException(
-                                    "Sunucu hatası: ${result.code}"
-                                )
+                            val json = try {
+                                JSONObject(responseText)
+                            } catch (error: Exception) {
+                                null
                             }
 
-                            val json =
-                                JSONObject(responseText)
+                            // ZORO_V2_ERROR_REPLY
+                            // Sunucu hata dondugunde de kendi cevabini okut.
+                            if (!result.isSuccessful) {
+
+                                val errorReply = when (result.code) {
+                                    401, 403 ->
+                                        "Sunucu kimlik doğrulaması başarısız. Uygulama ayarlarını kontrol edin."
+                                    else ->
+                                        json?.optString("reply", "")
+                                            .orEmpty()
+                                            .ifBlank { "Sunucu cevabında bir sorun oluştu." }
+                                }
+
+                                runOnUiThread {
+
+                                    addingTask = false
+
+                                    if (fromTaskScreen) {
+                                        tasksMessage = errorReply
+                                    } else {
+                                        lastReply = errorReply
+                                        speak(errorReply, "ZORO_RESPONSE_ERROR")
+                                    }
+                                }
+
+                                return
+                            }
+
+                            if (json == null) {
+                                throw IOException("Sunucu cevabı okunamadı.")
+                            }
+
+                            val serverActions = ZoroActions.list(json)
 
                             val action =
                                 json.optString(
@@ -1531,7 +1541,9 @@ class MainActivity : ComponentActivity() {
                                     ""
                                 )
 
-                            handleBackendAction(
+                            // Yeni sunucu "actions" listesi gonderir; eski tek
+                            // "action" alani yalnizca eski sunucu icin kullanilir.
+                            if (serverActions == null) handleBackendAction(
                                 action = action,
                                 taskText = json.optString(
                                     "task_text",
@@ -1565,13 +1577,35 @@ class MainActivity : ComponentActivity() {
                                     ""
                                 )
 
+                            val expectReply =
+                                json.optBoolean(
+                                    "expect_reply",
+                                    false
+                                )
+
                             runOnUiThread {
 
                                 addingTask = false
 
+                                // Takvim ve alarm degisiklikleri cevap okunmadan once yapilir;
+                                // basarisiz olursa sunucunun cevabi yerine hata okunur.
+                                val failures =
+                                    if (serverActions != null)
+                                        ZoroActions.runDataActions(
+                                            applicationContext,
+                                            serverActions,
+                                            this@MainActivity
+                                        )
+                                    else emptyList()
+
+                                val spoken =
+                                    if (failures.isNotEmpty())
+                                        failures.joinToString(" ")
+                                    else reply
+
                                 if (fromTaskScreen) {
 
-                                    tasksMessage = reply
+                                    tasksMessage = spoken
 
                                     if (
                                         action == "add_task"
@@ -1580,23 +1614,49 @@ class MainActivity : ComponentActivity() {
                                     }
 
                                 } else if (
-                                    reply.isNotBlank()
+                                    spoken.isNotBlank()
                                 ) {
 
-                                    speak(
-                                        reply,
-                                        "ZORO_REPLY"
-                                    )
+                                    lastReply = spoken
+
+                                    speakThen(
+                                        text = spoken,
+                                        listenForReply = expectReply && failures.isEmpty()
+                                    ) {
+
+                                        if (serverActions != null && failures.isEmpty()) {
+
+                                            val actionFailures =
+                                                ZoroActions.runIntentActions(
+                                                    this@MainActivity,
+                                                    serverActions
+                                                )
+
+                                            if (actionFailures.isNotEmpty()) {
+                                                val text = actionFailures.joinToString(" ")
+                                                lastReply = text
+                                                speak(text, "ZORO_ACTION_ERROR")
+                                            }
+                                        }
+                                    }
                                 }
+
+                                val remindersChanged =
+                                    serverActions?.any {
+                                        it.optString("type") in listOf(
+                                            "schedule_reminder",
+                                            "cancel_reminder"
+                                        )
+                                    } == true
 
                                 if (
                                     refreshTasksAfter &&
-                                    action in listOf(
+                                    (remindersChanged || action in listOf(
                                         "add_task",
                                         "delete_task",
                                         "complete_task",
                                         "clear_tasks"
-                                    )
+                                    ))
                                 ) {
 
                                     loadTasks()
@@ -1629,6 +1689,206 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+    // ==========================================
+    // ZORO 2.0: BAGLANTI YOKKEN YEREL KOMUTLAR
+    // ==========================================
+    // Eski kelime avcilari. Sunucuya ulasilamazsa calisir.
+    // Randevu silme/erteleme avcisi ("sil" Silivri'yi de yakaliyordu)
+    // cevrimdisi modda da kapali.
+
+    private fun handleLocalCommand(
+        message: String
+    ): Boolean {
+
+        // ZORO_PERSONAL_MEMORY_ROUTING_V1
+        // Kisisel hafiza komutlarini once yerel olarak isle.
+        if (ZoroMemoryVoice.isMemoryCommand(message)) {
+
+            Thread {
+                val answer = try {
+                    ZoroMemoryVoice.handleCommand(
+                        applicationContext,
+                        message
+                    )
+                } catch (error: Exception) {
+                    Log.e(
+                        "ZORO_MEMORY",
+                        "Hafiza komutu hatasi",
+                        error
+                    )
+                    "Kisisel hafiza islemi tamamlanamadi."
+                }
+
+                runOnUiThread {
+                    speak(
+                        answer,
+                        "ZORO_MEMORY_REPLY"
+                    )
+                }
+            }.start()
+
+            return true
+        }
+        // ZORO_CALENDAR_REMINDER_VOICE_ROUTING
+        // Mevcut randevunun hatirlatma suresini sesle degistir.
+        // Bu kontrol genel Python hatirlatmalarindan once calisir.
+        if (
+            ZoroCalendarReminderVoice.isReminderChangeCommand(
+                message
+            )
+        ) {
+
+            Thread {
+                val answer = try {
+                    ZoroCalendarReminderVoice.handleCommand(
+                        applicationContext,
+                        message
+                    )
+                } catch (error: Exception) {
+                    Log.e(
+                        "ZORO_REMINDER_VOICE",
+                        "Hatirlatma suresi komut hatasi",
+                        error
+                    )
+                    "Randevu hatirlatma suresi degistirilemedi."
+                }
+
+                runOnUiThread {
+                    speak(
+                        answer,
+                        "ZORO_REMINDER_VOICE_REPLY"
+                    )
+                }
+            }.start()
+
+            return true
+        }
+        // ZORO_CALENDAR_ADD_ROUTING
+        // Sesli randevulari telefondaki Zoro takvimine kaydet.
+        if (ZoroCalendarVoice.isCalendarAddCommand(message)) {
+
+            Thread {
+                val answer = try {
+                    ZoroCalendarVoice.addCalendarEvent(
+                        applicationContext,
+                        message
+                    )
+                } catch (error: Exception) {
+                    Log.e(
+                        "ZORO_CALENDAR_ADD",
+                        "Sesli randevu ekleme hatasi",
+                        error
+                    )
+                    "Randevu kaydedilirken bir hata olustu."
+                }
+
+                runOnUiThread {
+                    speak(
+                        answer,
+                        "ZORO_CALENDAR_ADD_REPLY"
+                    )
+                }
+            }.start()
+
+            return true
+        }
+        // ZORO_CALENDAR_VOICE_ROUTING
+        // Takvim sorgularini Python yerine telefonda isle.
+        if (ZoroCalendarVoice.isCalendarQuery(message)) {
+
+            Thread {
+                val answer = try {
+                    ZoroCalendarVoice.getCalendarAnswer(
+                        applicationContext,
+                        message
+                    )
+                } catch (error: Exception) {
+                    Log.e(
+                        "ZORO_CALENDAR_VOICE",
+                        "Takvim sesli komut hatasi",
+                        error
+                    )
+                    "Takvim sorgusu yapilirken bir hata olustu."
+                }
+
+                runOnUiThread {
+                    speak(
+                        answer,
+                        "ZORO_CALENDAR_REPLY"
+                    )
+                }
+            }.start()
+
+            return true
+        }
+
+        return false
+    }
+
+    // ==========================================
+    // ZORO 2.0: TELEFON HAFIZASINI SUNUCUYA TASI
+    // ==========================================
+    // Eski surumde "bunu unutma" kayitlari yalnizca telefonda
+    // duruyordu, yapay zeka goremiyordu. Bir kez sunucuya yuklenir.
+    // Telefondaki kayitlar silinmez.
+
+    private fun syncLocalMemoriesOnce() {
+
+        val prefs = getSharedPreferences("zoro_v2", Context.MODE_PRIVATE)
+
+        if (prefs.getBoolean("memories_synced", false)) {
+            return
+        }
+
+        val memories = try {
+            ZoroMemoryManager(applicationContext).getAllMemories()
+        } catch (error: Exception) {
+            Log.e("ZORO_MEMORY", "Yerel hafiza okunamadi", error)
+            return
+        }
+
+        if (memories.isEmpty()) {
+            prefs.edit().putBoolean("memories_synced", true).apply()
+            return
+        }
+
+        val items = JSONArray()
+
+        memories.forEach {
+            items.put(JSONObject().put("text", it.text))
+        }
+
+        val request = Request.Builder()
+            .url(ZoroServer.url("/memory/import"))
+            .post(
+                JSONObject()
+                    .put("items", items)
+                    .toString()
+                    .toRequestBody(
+                        "application/json; charset=utf-8".toMediaType()
+                    )
+            )
+            .build()
+
+        httpClient.newCall(request).enqueue(
+            object : Callback {
+
+                override fun onFailure(call: Call, e: IOException) {
+                    Log.w("ZORO_MEMORY", "Hafiza yuklenemedi, sonra tekrar denenecek", e)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    response.use {
+                        if (it.isSuccessful) {
+                            prefs.edit().putBoolean("memories_synced", true).apply()
+                            Log.i("ZORO_MEMORY", "${memories.size} hafiza kaydi sunucuya yuklendi")
                         }
                     }
                 }
@@ -1740,6 +2000,49 @@ class MainActivity : ComponentActivity() {
 
                 cancelAllStoredReminders()
             }
+        }
+    }
+
+    // ==========================================
+    // ZORO 2.0: SUNUCUDAN GELEN HATIRLATMALAR
+    // ==========================================
+
+    override fun scheduleReminderFromServer(
+        taskText: String,
+        dueAt: String,
+        alarmId: String,
+        repeatInterval: Long
+    ) {
+
+        if (taskText.isBlank() || !isValidDueAt(dueAt)) {
+            return
+        }
+
+        // Ayni alarm kimligi varsa once eskisini kaldir (saat degisikligi).
+        if (alarmId.isNotBlank()) {
+            cancelReminderByAlarmId(alarmId)
+        }
+
+        scheduleReminder(
+            taskText = taskText,
+            dueAt = dueAt,
+            alarmId = alarmId.ifBlank { dueAt },
+            repeatInterval = repeatInterval
+        )
+    }
+
+    override fun cancelReminderFromServer(
+        alarmId: String,
+        dueAt: String,
+        taskText: String
+    ) {
+
+        if (alarmId.isNotBlank() && alarmId != "null") {
+            cancelReminderByAlarmId(alarmId)
+        } else if (isValidDueAt(dueAt)) {
+            cancelReminderByDueAt(dueAt)
+        } else if (taskText.isNotBlank()) {
+            cancelReminderByTaskText(taskText)
         }
     }
 
@@ -2219,7 +2522,9 @@ fun ZoroApp(
     editTask: (ZoroTaskItem, String, String) -> Unit,    performTaskAction: (
         ZoroTaskItem,
         ZoroTaskOperation
-    ) -> Unit
+    ) -> Unit,
+    lastReply: String = "",
+    askText: (String) -> Unit = {}
 ) {
 
     val red = Color(0xFFB71C1C)
@@ -3074,6 +3379,53 @@ fun ZoroApp(
                                 text =
                                     "⏹ Sesli Dinlemeyi Durdur",
                                 fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        // ZORO_V2_TEXT_COMMAND
+                        // Sessiz ortamda yazarak komut ver.
+                        var commandInput by remember {
+                            mutableStateOf("")
+                        }
+
+                        OutlinedTextField(
+                            value = commandInput,
+                            onValueChange = { commandInput = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            placeholder = {
+                                Text(
+                                    text = "Zoro'ya yaz",
+                                    color = Color.White.copy(alpha = 0.75f)
+                                )
+                            },
+                            keyboardOptions = KeyboardOptions(
+                                imeAction = ImeAction.Send
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onSend = {
+                                    val text = commandInput.trim()
+                                    if (text.isNotEmpty()) {
+                                        askText(text)
+                                        commandInput = ""
+                                    }
+                                }
+                            ),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedBorderColor = Color.White,
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.6f),
+                                cursorColor = Color.White
+                            )
+                        )
+
+                        if (lastReply.isNotBlank()) {
+
+                            Text(
+                                text = lastReply,
+                                color = Color.White,
+                                fontSize = 14.sp
                             )
                         }
                     }

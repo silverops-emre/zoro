@@ -20,3 +20,6 @@ android/.kotlin/
 *.keystore
 *.jks
 signing.properties
+
+# Android server secrets
+android/zoro.properties

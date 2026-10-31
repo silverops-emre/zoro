@@ -55,6 +55,27 @@ class ZoroVoiceService : Service() {
         private const val TAG = "ZORO_VOICE"
         private const val CHANNEL_ID = "zoro_voice"
         private const val NOTIFICATION_ID = 3050
+
+        // ZORO_V2_SPEECH_SYNC
+        // Ana ekran cevap okurken mikrofon kapanir, Zoro kendi
+        // sesini komut sanmaz. Bitince dinleme geri acilir.
+        @Volatile
+        private var active: ZoroVoiceService? = null
+
+        fun pauseForSpeech() {
+            active?.let { service ->
+                service.handler.post { service.pauseListeningForSpeech() }
+            }
+        }
+
+        fun resumeAfterSpeech(listenForReply: Boolean) {
+            active?.let { service ->
+                service.handler.post { service.resumeListeningAfterSpeech(listenForReply) }
+            }
+        }
+
+        val isActive: Boolean
+            get() = active?.running == true
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -235,6 +256,7 @@ class ZoroVoiceService : Service() {
             }
 
             running = true
+            active = this
 
             publishStatus(STATUS_STARTING)
 
@@ -611,6 +633,65 @@ class ZoroVoiceService : Service() {
     }
 
     // ==========================================
+    // ZORO_V2_SPEECH_SYNC: KONUSURKEN DUR
+    // ==========================================
+
+    private val speechSafetyResume = Runnable {
+        Log.w(TAG, "Konusma bitis sinyali gelmedi, dinleme geri aciliyor.")
+        resumeListeningAfterSpeech(listenForReply = false)
+    }
+
+    private fun pauseListeningForSpeech() {
+
+        if (!running) {
+            return
+        }
+
+        speaking = true
+
+        handler.removeCallbacks(restartListening)
+        handler.removeCallbacks(recognitionWatchdog)
+
+        if (recognizing) {
+            try {
+                recognizer?.cancel()
+            } catch (error: Exception) {
+                Log.w(TAG, "Dinleme durdurma uyarisi", error)
+            }
+            recognizing = false
+        }
+
+        // Bitis sinyali kaybolursa servis sonsuza kadar susmasin.
+        handler.removeCallbacks(speechSafetyResume)
+        handler.postDelayed(speechSafetyResume, 60000)
+    }
+
+    private fun resumeListeningAfterSpeech(
+        listenForReply: Boolean
+    ) {
+
+        handler.removeCallbacks(speechSafetyResume)
+        speaking = false
+
+        if (!running) {
+            return
+        }
+
+        if (listenForReply) {
+
+            // Zoro soru sordu: uyandirma kelimesi beklemeden cevabi dinle.
+            waitingForCommand = true
+
+            handler.removeCallbacks(commandTimeout)
+            handler.postDelayed(commandTimeout, 10000)
+
+            publishStatus(STATUS_WAITING_COMMAND)
+        }
+
+        scheduleListening(450)
+    }
+
+    // ==========================================
     // DINLEMEYI BASLAT
     // ==========================================
 
@@ -919,6 +1000,10 @@ class ZoroVoiceService : Service() {
     // ==========================================
 
     override fun onDestroy() {
+
+        if (active === this) {
+            active = null
+        }
 
         running = false
         recognizing = false

@@ -1,0 +1,8 @@
+# Copy to zoro.properties (git-ignored) before building.
+# Zoro sunucusu (Caddy HTTPS). Emulatorde yerel test: http://10.0.2.2:5050
+zoro.serverUrl=https://37-27-156-54.sslip.io
+# Caddy basic auth kullanici adi / sifresi (sunucudaki Caddyfile ile ayni)
+zoro.basicUser=
+zoro.basicPassword=
+# Sunucudaki ZORO_API_KEY ile ayni (bos birakilabilir)
+zoro.apiKey=
